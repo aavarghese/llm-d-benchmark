@@ -133,15 +133,27 @@ class FMADeployStep(Step):
                 )
 
         if len(errors) == 0:
-            # Apply deployment
+            # Apply deployment (ISC + LauncherConfig + LPP + requester Deployment)
             result = cmd.kube("apply", "-f", str(deploy_yaml))
             if not result.success:
                 errors.append(f"Failed to apply fma deployment: {result.stderr}")
 
         if len(errors) == 0:
+            # Apply HPA for the FMA requester Deployment when fma.hpa.enabled.
+            hpa_yaml = self._find_yaml(stack_path, "29_fma-hpa")
+            if hpa_yaml and self._has_yaml_content(hpa_yaml):
+                result = cmd.kube("apply", "-f", str(hpa_yaml))
+                if not result.success:
+                    errors.append(f"Failed to apply FMA HPA: {result.stderr}")
+                else:
+                    context.logger.log_info(
+                        "✅ FMA HPA applied (fma-hpa-* → fma-requester Deployment)"
+                    )
+
+        if len(errors) == 0:
             resource_types = (
                 "InferenceServerConfig,LauncherConfig,"
-                "LauncherPopulationPolicy,ReplicaSet,pods"
+                "LauncherPopulationPolicy,Deployment,pods"
             )
             cmd.kube(
                 "get",

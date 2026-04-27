@@ -1,0 +1,108 @@
+# FMA + HPA Use Case-1 Scenario for LLM-D Deployment
+#
+# Deploys Fast Model Actuation with a HorizontalPodAutoscaler that scales
+# the FMA requester Deployment based on the EPP flow-control queue depth
+# metric (inference_extension_flow_control_queue_size).
+#
+# Case-1 integration (from the FMA/HPA design):
+#   HPA → fma-requester Deployment (scaleTargetRef)
+#        ↓ (dual-pods controller binds each new requester to a launcher)
+#     Launcher pod (sleeping vLLM wakes in ~18ms, or new start in ~60-90s)
+#        ↑
+#     EPP flow-control queue metric drives the HPA scaling decision
+#
+# Prerequisites:
+#   - Prometheus-adapter installed (handled automatically by step_03 when
+#     fma.hpa.enabled is true, same as for WVA scenarios).
+#   - EPP flowControl feature gate enabled (set via inferenceExtension below).
+#   - GPU nodes available for launcher pod scheduling.
+#
+# All parameters not defined here use defaults from defaults.yaml.
+
+scenario:
+  - name: "fma-hpa-example"
+    model:
+      name: meta-llama/Llama-3.1-8B-Instruct
+      shortName: llama-3.1-8b
+      path: models/meta-llama/Llama-3.1-8B-Instruct
+      huggingfaceId: meta-llama/Llama-3.1-8B-Instruct
+
+    modelservice:
+      enabled: false
+    standalone:
+      enabled: false
+
+    fma:
+      enabled: true
+      iterations: 1
+
+      # HPA configuration — case-1: scale on EPP queue depth
+      hpa:
+        enabled: true
+        minReplicas: 1
+        maxReplicas: 5
+        # Scale up when total EPP queue depth exceeds 5 pending requests.
+        queueSizeTarget: 5
+        behavior:
+          scaleUp:
+            # React immediately to queue pressure (no stabilization delay).
+            stabilizationWindowSeconds: 0
+            policies:
+              - type: Percent
+                value: 100
+                periodSeconds: 15
+          scaleDown:
+            # Wait 4 minutes before scaling down to avoid thrashing.
+            stabilizationWindowSeconds: 240
+            policies:
+              - type: Percent
+                value: 100
+                periodSeconds: 15
+
+    # Enable EPP flow-control so inference_extension_flow_control_queue_size
+    # is populated.  Same approach as the inference-scheduling-wva scenario.
+    inferenceExtension:
+      pluginsConfigFile: "fma-hpa-plugins.yaml"
+      pluginsCustomConfig:
+        fma-hpa-plugins.yaml: |
+          apiVersion: inference.networking.x-k8s.io/v1alpha1
+          kind: EndpointPickerConfig
+          featureGates:
+            - flowControl
+          plugins:
+            - type: queue-scorer
+            - type: kv-cache-utilization-scorer
+            - type: prefix-cache-scorer
+          schedulingProfiles:
+            - name: default
+              plugins:
+                - pluginRef: queue-scorer
+                  weight: 2
+                - pluginRef: kv-cache-utilization-scorer
+                  weight: 2
+                - pluginRef: prefix-cache-scorer
+                  weight: 3
+
+    workDir: "~/data/fma-hpa"
+
+    harness:
+      name: nop
+      profile: nop.yaml
+      executable: llm-d-benchmark.py
+      experimentProfile: nop.yaml
+      condaEnvName: nop-env
+      waitTimeout: 3600
+      loadParallelism: 1
+      podLabel: llmdbench-harness-fma-hpa
+      debug: false
+      resources:
+        cpu: 16
+        memory: 32Gi
+      output: local
+      inferencePerf:
+        rayonNumThreads: 4
+
+    images:
+      benchmark:
+        repository: ghcr.io/llm-d/llm-d-benchmark
+        tag: nightly

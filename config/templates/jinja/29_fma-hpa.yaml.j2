@@ -1,0 +1,90 @@
+{# ============================================================================
+   29_fma-hpa.yaml.j2
+
+   HorizontalPodAutoscaler for the FMA requester Deployment (case-1).
+
+   Scales the fma-requester Deployment using the EPP flow-control queue
+   depth metric (inference_extension_flow_control_queue_size).  This is
+   case-1 from the FMA/HPA integration design:
+
+     HPA → fma-requester Deployment
+          ↓ (via dual-pods controller)
+       Launcher pod (vLLM)
+          ↑
+       EPP flow-control queue metric
+
+   Requirements:
+     - flowControl feature gate must be enabled in the EPP EndpointPickerConfig
+       so that inference_extension_flow_control_queue_size is populated.
+     - prometheus-adapter must expose the metric as an external metric
+       (see 21_prometheus-adapter-values.yaml.j2).
+     - fma-requester must be a Deployment (not a ReplicaSet).
+
+   Only rendered when fma.enabled AND fma.hpa.enabled are both true.
+   ============================================================================ #}
+{% if fma is defined and fma.enabled | default(false) and fma.hpa is defined and fma.hpa.enabled | default(false) %}
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: fma-hpa-{{ model_id_label }}
+  namespace: {{ namespace.name }}
+  labels:
+    app: fma-requester-{{ model_id_label }}
+{% if fma.labels is defined %}
+{% for key, value in fma.labels.items() %}
+    {{ key }}: "{{ value }}"
+{% endfor %}
+{% endif %}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: fma-requester-{{ model_id_label }}
+  minReplicas: {{ fma.hpa.minReplicas | default(1) }}
+  maxReplicas: {{ fma.hpa.maxReplicas | default(5) }}
+  metrics:
+    # Primary signal: scale up when the EPP flow-control queue is non-empty.
+    # `sum(...)` aggregates across all EPP pods in the namespace so a
+    # single HPA controls based on the total pending request count.
+    - type: External
+      external:
+        metric:
+          name: inference_extension_flow_control_queue_size
+          selector:
+            matchLabels:
+              namespace: {{ namespace.name }}
+        target:
+          type: Value
+          value: "{{ fma.hpa.queueSizeTarget | default(5) }}"
+    # Secondary signal: scale up when in-flight requests per replica exceed
+    # the target. Guards against queue depth staying low while requests pile
+    # up (e.g. long-running requests that left the queue but are still active).
+    - type: External
+      external:
+        metric:
+          name: inference_objective_running_requests
+          selector:
+            matchLabels:
+              namespace: {{ namespace.name }}
+        target:
+          type: AverageValue
+          averageValue: "{{ fma.hpa.runningRequestsTarget | default(10) }}"
+{% if fma.hpa.behavior is defined %}
+  behavior:
+{{ fma.hpa.behavior | toyaml | indent(4, first=True) }}
+{% else %}
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 0
+      policies:
+        - type: Percent
+          value: 100
+          periodSeconds: 15
+    scaleDown:
+      stabilizationWindowSeconds: 240
+      policies:
+        - type: Percent
+          value: 100
+          periodSeconds: 15
+{% endif %}
+{% endif %}

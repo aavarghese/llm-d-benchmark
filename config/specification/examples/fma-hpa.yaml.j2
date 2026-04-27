@@ -1,0 +1,19 @@
+# FMA + HPA Case-1 Specification
+# Deploys Fast Model Actuation with HPA scaling on EPP queue depth.
+# See scenarios/examples/fma-hpa.yaml for full scenario details.
+
+# [REQUIRED]
+{% set base_dir = base_dir | default('../') -%}
+base_dir: {{ base_dir }}
+
+# [REQUIRED]
+values_file:
+  path: {{ base_dir }}/config/templates/values/defaults.yaml
+
+# [REQUIRED]
+template_dir:
+  path: {{ base_dir }}/config/templates/jinja
+
+# [OPTIONAL]
+scenario_file:
+  path: {{ base_dir }}/config/scenarios/examples/fma-hpa.yaml

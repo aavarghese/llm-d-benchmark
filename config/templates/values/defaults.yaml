@@ -1257,6 +1257,44 @@ fma:
   modelMountPath: /model-cache
   modelPvcName: model-pvc
 
+  # --------------------------------------------------------------------------
+  # HPA (HorizontalPodAutoscaler) — FMA requester Deployment autoscaling
+  #
+  # Case-1 uses the EPP flow-control queue metric to drive HPA directly,
+  # without WVA. The HPA scales the fma-requester Deployment; each new
+  # requester pod triggers the dual-pods controller to wake a sleeping
+  # launcher (T_hot) or start a new vLLM instance (T_warm).
+  #
+  # Requires:
+  #   - flowControl feature gate enabled in the EPP EndpointPickerConfig
+  #   - prometheus-adapter installed and serving the EPP external metric
+  # --------------------------------------------------------------------------
+  hpa:
+    enabled: false
+    minReplicas: 1
+    maxReplicas: 5
+    # Scale up when the sum of inference_extension_flow_control_queue_size
+    # across all EPP pods in the namespace exceeds this value.
+    queueSizeTarget: 5
+    # Scale up when average in-flight requests per replica exceeds this value.
+    # Secondary signal alongside queueSizeTarget.
+    runningRequestsTarget: 10
+    behavior:
+      scaleUp:
+        # No stabilization: react immediately when queue depth spikes.
+        stabilizationWindowSeconds: 0
+        policies:
+          - type: Percent
+            value: 100
+            periodSeconds: 15
+      scaleDown:
+        # Wait 4 minutes before scaling down to avoid thrashing.
+        stabilizationWindowSeconds: 240
+        policies:
+          - type: Percent
+            value: 100
+            periodSeconds: 15
+
 # ============================================================================
 # DOWNLOAD JOB CONFIGURATION
 # ============================================================================

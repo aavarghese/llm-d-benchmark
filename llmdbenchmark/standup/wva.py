@@ -365,6 +365,28 @@ def stacks_enabling_wva(rendered_stacks: list[Path]) -> list[tuple[Path, dict]]:
     return pairs
 
 
+def stacks_enabling_fma_hpa(rendered_stacks: list[Path]) -> list[tuple[Path, dict]]:
+    """Return (stack_path, plan_config) pairs for every rendered stack with fma.hpa.enabled.
+
+    Used to decide whether prometheus-adapter must be installed even when
+    WVA is not enabled (FMA case-1: HPA drives directly off EPP queue metrics).
+    """
+    pairs: list[tuple[Path, dict]] = []
+    for stack_path in rendered_stacks:
+        cfg_file = stack_path / "config.yaml"
+        if not cfg_file.exists():
+            continue
+        try:
+            with open(cfg_file, encoding="utf-8") as fh:
+                cfg = yaml.safe_load(fh) or {}
+        except (OSError, yaml.YAMLError):
+            continue
+        fma_cfg = cfg.get("fma", {})
+        if fma_cfg.get("enabled", False) and fma_cfg.get("hpa", {}).get("enabled", False):
+            pairs.append((stack_path, cfg))
+    return pairs
+
+
 def unique_wva_namespaces(
     stacks: list[tuple[Path, dict]],
 ) -> dict[str, tuple[Path, dict]]:

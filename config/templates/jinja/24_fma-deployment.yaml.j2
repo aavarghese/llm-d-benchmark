@@ -86,7 +86,7 @@ spec:
             value: "{{ fma.modelMountPath }}"
           - name: VLLM_CACHE_ROOT
             value: "{{ fma.modelMountPath }}/vllm"
-          - name: FLASHINFER_WORKSPACE_DIR
+          - name: FLASHINFER_WORKSPACE_BASE
             value: "{{ fma.modelMountPath }}/flashinfer"
           - name: TRITON_CACHE_DIR
             value: "{{ fma.modelMountPath }}/triton"
@@ -141,7 +141,7 @@ spec:
       launcherCount: 1
 ---
 apiVersion: apps/v1
-kind: ReplicaSet
+kind: Deployment
 metadata:
   name: fma-requester-{{ model_id_label }}
   labels:
@@ -160,6 +160,11 @@ spec:
       llm-d.ai/inference-serving: "true"
       llm-d.ai/model: {{ model_id_label }}
       llm-d.ai/role: requester
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
   template:
     metadata:
       labels:
@@ -186,8 +191,8 @@ spec:
             httpGet:
               path: /ready
               port: 8080
-            initialDelaySeconds: 2
-            periodSeconds: 5
+            initialDelaySeconds: {{ fma.requester.readinessProbeInitialDelay | default(2) }}
+            periodSeconds: {{ fma.requester.readinessProbePeriod | default(5) }}
           resources:
             limits:
               nvidia.com/gpu: {{ fma.requester.limitsGPU }}

@@ -2,18 +2,39 @@
    21_prometheus-adapter-values.yaml.j2
 
    Helm values for the prometheus-community/prometheus-adapter chart.
-   Installed alongside WVA to bridge WVA metrics into the Kubernetes
-   external metrics API for HPA consumption.
+   Bridges Prometheus metrics into the Kubernetes external metrics API so
+   HPA can consume them.
 
-   Only rendered when wva.enabled is true.
+   Rendered when either:
+     - wva.enabled is true (WVA uses wva_desired_replicas)
+     - fma.hpa.enabled is true (FMA case-1 uses EPP queue metrics)
+
+   The Prometheus connection settings come from wva.prometheus when WVA is
+   enabled; FMA-only deployments must set fma.prometheus.baseUrl/port to
+   override the default thanos-querier endpoint.
    ============================================================================ #}
-{% if wva is defined and wva.enabled | default(false) %}
+{% set _wva_enabled = wva is defined and wva.enabled | default(false) %}
+{% set _fma_hpa_enabled = fma is defined and fma.enabled | default(false) and fma.hpa is defined and fma.hpa.enabled | default(false) %}
+{% if _wva_enabled or _fma_hpa_enabled %}
+{# Resolve Prometheus connection: prefer wva.prometheus, fall back to fma.prometheus or defaults. #}
+{% if _wva_enabled %}
+{% set _prom_url = wva.prometheus.baseUrl | default('https://thanos-querier.openshift-monitoring.svc.cluster.local') %}
+{% set _prom_port = wva.prometheus.port | default(9091) %}
+{% elif fma.prometheus is defined %}
+{% set _prom_url = fma.prometheus.baseUrl | default('https://thanos-querier.openshift-monitoring.svc.cluster.local') %}
+{% set _prom_port = fma.prometheus.port | default(9091) %}
+{% else %}
+{% set _prom_url = 'https://thanos-querier.openshift-monitoring.svc.cluster.local' %}
+{% set _prom_port = 9091 %}
+{% endif %}
 prometheus:
-  url: {{ wva.prometheus.baseUrl | default('https://thanos-querier.openshift-monitoring.svc.cluster.local') }}
-  port: {{ wva.prometheus.port | default(9091) }}
+  url: {{ _prom_url }}
+  port: {{ _prom_port }}
 
 rules:
   external:
+{% if _wva_enabled %}
+  # WVA emits wva_desired_replicas; HPA reads it via the external metrics API.
   - seriesQuery: 'wva_desired_replicas{variant_name!="",exported_namespace!=""}'
     resources:
       overrides:
@@ -23,6 +44,28 @@ rules:
       matches: "^wva_desired_replicas"
       as: "wva_desired_replicas"
     metricsQuery: 'wva_desired_replicas{<<.LabelMatchers>>}'
+{% endif %}
+{% if _fma_hpa_enabled %}
+  # EPP flow-control queue depth — primary FMA case-1 scale-up signal.
+  # sum() aggregates across all EPP pods in the namespace.
+  - seriesQuery: 'inference_extension_flow_control_queue_size{namespace!=""}'
+    resources:
+      overrides:
+        namespace: {resource: "namespace"}
+    name:
+      matches: "^inference_extension_flow_control_queue_size"
+      as: "inference_extension_flow_control_queue_size"
+    metricsQuery: 'sum(inference_extension_flow_control_queue_size{<<.LabelMatchers>>})'
+  # In-flight running requests — secondary scaling signal.
+  - seriesQuery: 'inference_objective_running_requests{namespace!=""}'
+    resources:
+      overrides:
+        namespace: {resource: "namespace"}
+    name:
+      matches: "^inference_objective_running_requests"
+      as: "inference_objective_running_requests"
+    metricsQuery: 'sum(inference_objective_running_requests{<<.LabelMatchers>>})'
+{% endif %}
 
 replicas: 2
 logLevel: 4

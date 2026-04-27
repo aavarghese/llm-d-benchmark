@@ -490,33 +490,39 @@ class WorkloadMonitoringStep(Step):
     ) -> None:
         """Install WVA controller + prometheus-adapter once per unique namespace.
 
-        Runs only when at least one rendered stack has ``wva.enabled: true``
-        and the platform is OpenShift. Provisions:
+        Runs when at least one rendered stack has ``wva.enabled: true`` OR
+        ``fma.hpa.enabled: true`` and the platform is OpenShift. Provisions:
 
         1. prometheus-adapter helm chart + prometheus-ca ConfigMap in the
            user-workload monitoring namespace (cluster-scoped dependency,
-           installed once regardless of how many WVA namespaces exist).
+           installed once regardless of how many WVA/FMA-HPA namespaces exist).
+           The rendered 21_prometheus-adapter-values.yaml.j2 includes rules for
+           both wva_desired_replicas (WVA) and EPP queue metrics (FMA case-1).
         2. The thanos-querier ClusterRole (from rendered 22_prometheus-rbac).
-        3. The WVA namespace label (from rendered 23_wva-namespace).
-        4. The WVA controller helm chart into each unique wva.namespace.
+        3. The WVA namespace label (from rendered 23_wva-namespace) — WVA only.
+        4. The WVA controller helm chart into each unique wva.namespace — WVA only.
 
         The chart itself brings its own RBAC (``templates/rbac/*``), CRD
         (``llmd.ai/variantautoscaling``), ServiceMonitor, and ConfigMaps.
         """
-        pairs = wva_mod.stacks_enabling_wva(context.rendered_stacks or [])
-        if not pairs:
+        wva_pairs = wva_mod.stacks_enabling_wva(context.rendered_stacks or [])
+        fma_hpa_pairs = wva_mod.stacks_enabling_fma_hpa(context.rendered_stacks or [])
+
+        # prometheus-adapter is needed for both WVA metrics and FMA HPA EPP metrics.
+        needs_adapter = bool(wva_pairs or fma_hpa_pairs)
+        if not needs_adapter:
             return
 
         if not context.is_openshift:
             context.logger.log_info(
-                "ℹ️  WVA is enabled but platform is not OpenShift -- "
-                "skipping WVA admin install (not yet verified on non-OCP)"
+                "ℹ️  WVA/FMA-HPA is enabled but platform is not OpenShift -- "
+                "skipping prometheus-adapter admin install (not yet verified on non-OCP)"
             )
             return
 
-        # prometheus-adapter + ClusterRole: cluster-wide, install once
-        # from the first stack's rendered templates.
-        first_stack, first_cfg = pairs[0]
+        # prometheus-adapter + ClusterRole: cluster-wide, install once from
+        # the first available stack's rendered templates.
+        first_stack, first_cfg = (wva_pairs or fma_hpa_pairs)[0]
         monitoring_ns = (
             first_cfg.get("openshiftMonitoring", {})
             .get("userWorkloadMonitoringNamespace", "openshift-user-workload-monitoring")
@@ -526,9 +532,8 @@ class WorkloadMonitoringStep(Step):
         if not prom_ca_cert:
             context.logger.log_warning(
                 "Could not extract a Prometheus CA cert. Skipping "
-                "prometheus-adapter install -- the WVA controller will still "
-                "run (TLS insecureSkipVerify=true) but the HPA will not "
-                "receive metrics, so auto-scaling is disabled.\n"
+                "prometheus-adapter install -- HPA will not receive metrics, "
+                "so auto-scaling is disabled.\n"
                 "  To fix, ensure either:\n"
                 "    1) `oc get secret thanos-querier-tls -n openshift-monitoring` "
                 "returns the secret (needs cluster-admin on most clusters), or\n"
@@ -547,8 +552,8 @@ class WorkloadMonitoringStep(Step):
                 errors=errors,
             )
 
-        # One WVA controller per unique wva.namespace.
-        for wva_ns, (stack_path, plan_config) in wva_mod.unique_wva_namespaces(pairs).items():
+        # WVA controller: one per unique wva.namespace (skipped for FMA-only stacks).
+        for wva_ns, (stack_path, plan_config) in wva_mod.unique_wva_namespaces(wva_pairs).items():
             wva_mod.apply_wva_namespace_label(cmd, stack_path, wva_ns)
             wva_mod.install_wva_for_namespace(
                 cmd=cmd,
