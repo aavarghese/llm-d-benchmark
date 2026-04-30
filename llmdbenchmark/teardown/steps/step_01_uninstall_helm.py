@@ -99,10 +99,24 @@ class UninstallHelmStep(Step):
         context: ExecutionContext,
         namespace: str,
     ) -> None:
-        """Deletes LauncherPopulationPolicy, InferenceServerConfig, and
-        LauncherConfig so the dual-pods controller can remove pod
-        finalizers before the Helm chart uninstall takes the controller down.
+        """Delete FMA objects so the controller can remove pod finalizers
+        before the Helm chart uninstall takes it down.
         """
+        # Delete requester to start the unbinding
+        context.logger.log_info(
+            f"  Deleting FMA requester ReplicaSet in {namespace} "
+            "(before Helm uninstall)",
+            emoji="🗑️",
+        )
+        cmd.kube(
+            "delete", "replicaset",
+            "--selector=stood-up-via=fma",
+            "--namespace", namespace,
+            "--ignore-not-found=true",
+            check=False,
+        )
+
+        # Delete FMA CRs
         fma_cr_kinds = [
             "launcherpopulationpolicy",
             "inferenceserverconfig",
@@ -126,6 +140,23 @@ class UninstallHelmStep(Step):
                     "--ignore-not-found=true",
                     cr, check=False,
                 )
+
+        # Wait for all FMA pods to terminate while the controller is still running
+        for selector, label in [
+            ("app.kubernetes.io/component=launcher", "launcher pods"),
+            ("llm-d.ai/role=requester", "requester pods"),
+        ]:
+            context.logger.log_info(
+                f"Waiting for FMA {label} to terminate in {namespace}..."
+            )
+            cmd.kube(
+                "wait", "pod",
+                "--for=delete",
+                f"--selector={selector}",
+                "--namespace", namespace,
+                "--timeout=120s",
+                check=False,
+            )
 
     def _collect_model_labels(self, context: ExecutionContext) -> list[str]:
         """Collect model ID labels used to match helm releases."""
