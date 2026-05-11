@@ -1,0 +1,43 @@
+{# ============================================================================
+   31_helmfile-fma-hpa.yaml.j2
+
+   Helmfile for deploying InferencePool (EPP) + Gateway (llm-d-infra)
+   in FMA+HPA mode. Mirrors the modelservice helmfile (10_helmfile-main)
+   but only installs the inference extension and infra components needed
+   for HPA-driven autoscaling via EPP metrics.
+
+   Only rendered when both fma.enabled and fma.hpa.enabled are true.
+   ============================================================================ #}
+{% if fma is defined and fma.enabled | default(false) and fma.hpa is defined and fma.hpa.enabled | default(false) %}
+helmDefaults:
+  createNamespace: false
+---
+
+repositories:
+  - name: llm-d-infra
+    url: {{ helmRepositories.llmDInfra.url }}
+
+releases:
+  - name: infra-llmdbench
+    namespace: {{ gateway.namespace }}
+    chart: llm-d-infra/llm-d-infra
+    version: {{ chartVersions.llmDInfra }}
+    installed: true
+    labels:
+      type: infrastructure
+      kind: fma-hpa
+    values:
+      - infra.yaml
+
+  - name: {{ model_id_label }}-gaie
+    namespace: {{ gateway.namespace }}
+    chart: oci://registry.k8s.io/gateway-api-inference-extension/charts/inferencepool
+    version: {{ chartVersions.inferencePool }}
+    installed: true
+    needs:
+      - {{ gateway.namespace }}/infra-llmdbench
+    values:
+      - fma-hpa-gaie-values.yaml
+    labels:
+      kind: fma-hpa
+{% endif %}

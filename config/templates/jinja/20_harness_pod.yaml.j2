@@ -111,6 +111,22 @@ spec:
       value: "{{ fma.launcherConfigurator.port }}"
     - name: LLMDBENCH_FMA_ITERATIONS
       value: "{{ fma.iterations }}"
+{% if fma.hpa is defined and fma.hpa.enabled | default(false) %}
+    - name: LLMDBENCH_FMA_HPA_ENABLED
+      value: "true"
+    - name: LLMDBENCH_FMA_HPA_MIN_REPLICAS
+      value: "{{ fma.hpa.minReplicas }}"
+    - name: LLMDBENCH_FMA_HPA_MAX_REPLICAS
+      value: "{{ fma.hpa.maxReplicas }}"
+    - name: LLMDBENCH_FMA_HPA_LOADGEN_WORKERS
+      value: "{{ fma.hpa.loadgen.workers }}"
+    - name: LLMDBENCH_FMA_HPA_LOADGEN_DURATION
+      value: "{{ fma.hpa.loadgen.durationSeconds }}"
+    - name: LLMDBENCH_FMA_HPA_LOADGEN_MAX_TOKENS
+      value: "{{ fma.hpa.loadgen.maxTokens }}"
+    - name: LLMDBENCH_FMA_HPA_LOADGEN_IMAGE
+      value: "{{ fma.hpa.loadgen.image }}"
+{% endif %}
 {% endif %}
 {% if harness.extraEnvVars is defined and harness.extraEnvVars %}
 {% for env_entry in harness.extraEnvVars %}

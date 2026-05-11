@@ -339,6 +339,132 @@ def install_prometheus_adapter(  # pylint: disable=too-many-arguments
         )
 
 
+def install_prometheus_adapter_with_values(  # pylint: disable=too-many-arguments
+    cmd: CommandExecutor,
+    context: ExecutionContext,
+    plan_config: dict,
+    stack_path: Path,
+    monitoring_ns: str,
+    prom_ca_cert: str,
+    values_template_name: str,
+    errors: list,
+) -> None:
+    """Install prometheus-adapter using a specific rendered values template.
+
+    Like ``install_prometheus_adapter`` but parameterized on the values
+    template name so callers can point at either the WVA rules
+    (21_prometheus-adapter-values) or the EPP rules
+    (30_fma-prometheus-adapter-epp).
+    """
+    tmp_dir = Path(tempfile.mkdtemp())
+    cert_path = tmp_dir / "prometheus-ca.crt"
+    cert_path.write_text(prom_ca_cert, encoding="utf-8")
+
+    result = cmd.kube(
+        "create",
+        "configmap",
+        "prometheus-ca",
+        f"--from-file=ca.crt={cert_path}",
+        "--dry-run=client",
+        "-o",
+        "yaml",
+        namespace=monitoring_ns,
+        check=False,
+    )
+    if result.success and result.stdout.strip():
+        cm_yaml_path = tmp_dir / "prometheus-ca-configmap.yaml"
+        cm_yaml_path.write_text(result.stdout, encoding="utf-8")
+        apply_result = cmd.kube(
+            "apply",
+            "-f",
+            str(cm_yaml_path),
+            namespace=monitoring_ns,
+            check=False,
+        )
+        if not apply_result.success:
+            context.logger.log_warning(
+                f"prometheus-ca ConfigMap apply failed: {apply_result.stderr}"
+            )
+    elif not result.success:
+        context.logger.log_warning(
+            f"prometheus-ca ConfigMap creation failed: {result.stderr}"
+        )
+
+    existing_release, existing_ns = _find_existing_prometheus_adapter_release(cmd)
+    if existing_release:
+        context.logger.log_info(
+            f"prometheus-adapter is already installed cluster-wide "
+            f"(release={existing_release!r}, namespace={existing_ns!r}). "
+            "Reusing existing install."
+        )
+    else:
+        repo_url = _require_config(
+            plan_config, "helmRepositories", "prometheusAdapter", "url",
+        )
+        chart_name = _require_config(
+            plan_config, "helmRepositories", "prometheusAdapter", "name",
+        )
+        repo_alias = "prometheus-community"
+
+        cmd.helm("repo", "add", repo_alias, repo_url, check=False)
+        cmd.helm("repo", "update", check=False)
+
+        adapter_values = _find_yaml(stack_path, values_template_name)
+        if not adapter_values:
+            errors.append(
+                f"prometheus-adapter values template ({values_template_name}) "
+                "not found"
+            )
+            return
+
+        adapter_version = plan_config.get("chartVersions", {}).get(
+            "prometheusAdapter", ""
+        )
+
+        context.logger.log_info(
+            f"Installing prometheus-adapter"
+            f"{' v' + adapter_version if adapter_version else ''} "
+            f"into ns/{monitoring_ns} "
+            f"(values: {values_template_name})"
+        )
+        version_args = ("--version", adapter_version) if adapter_version else ()
+        result = cmd.helm(
+            "upgrade",
+            "--install",
+            "prometheus-adapter",
+            f"{repo_alias}/{chart_name}",
+            *version_args,
+            "--namespace",
+            monitoring_ns,
+            "--create-namespace",
+            "-f",
+            str(adapter_values),
+        )
+        if not result.success:
+            errors.append(f"Failed to install prometheus-adapter: {result.stderr}")
+        else:
+            wait = cmd.wait_for_pods(
+                label="app.kubernetes.io/name=prometheus-adapter",
+                namespace=monitoring_ns,
+                timeout=300,
+                poll_interval=5,
+                description=f"prometheus-adapter in ns/{monitoring_ns}",
+            )
+            if not wait.success:
+                errors.append(
+                    f"prometheus-adapter pods did not become Ready in "
+                    f"ns/{monitoring_ns}: {wait.stderr}"
+                )
+
+    rbac_yaml = _find_yaml(stack_path, "22_prometheus-rbac")
+    if rbac_yaml and _has_yaml_content(rbac_yaml):
+        result = cmd.kube("apply", "-f", str(rbac_yaml), check=False)
+        if not result.success:
+            context.logger.log_warning(
+                f"ClusterRole creation failed (non-fatal): {result.stderr}"
+            )
+
+
 def apply_wva_namespace_label(
     cmd: CommandExecutor, stack_path: Path, wva_namespace: str
 ) -> None:

@@ -1,5 +1,6 @@
 """Step 06 -- Deploy Fast Model Actuation Controllers."""
 
+import shutil
 from pathlib import Path
 from datetime import datetime, timezone
 
@@ -150,6 +151,11 @@ class FMADeployStep(Step):
                 namespace,
             )
 
+        # FMA+HPA: deploy EPP/Gateway/InferencePool and HPA
+        fma_cfg = plan_config.get("fma", {})
+        if len(errors) == 0 and fma_cfg.get("hpa", {}).get("enabled"):
+            self._deploy_fma_hpa(cmd, context, plan_config, stack_path, namespace, errors)
+
         self._propagate_standup_parameters(cmd, context, plan_config)
 
         if len(errors) > 0:
@@ -246,6 +252,85 @@ class FMADeployStep(Step):
             return
 
         context.logger.log_info("✅ Fast Model Actuation ClusterRole installed")
+
+    def _deploy_fma_hpa(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+        self,
+        cmd: CommandExecutor,
+        context: ExecutionContext,
+        plan_config: dict,
+        stack_path: Path,
+        namespace: str,
+        errors: list[str],
+    ) -> None:
+        """Deploy EPP/Gateway/InferencePool and HPA for FMA+HPA mode."""
+        context.logger.log_info("Deploying FMA+HPA components (EPP, Gateway, HPA)...")
+
+        # Prepare helm working directory with values files
+        fma_hpa_helm_dir = context.setup_helm_dir() / f"{stack_path.name}-fma-hpa"
+        fma_hpa_helm_dir.mkdir(parents=True, exist_ok=True)
+
+        values_map = {
+            "11_infra": "infra.yaml",
+            "32_fma-hpa-gaie-values": "fma-hpa-gaie-values.yaml",
+        }
+        for prefix, target_name in values_map.items():
+            source = self._find_yaml(stack_path, prefix)
+            if source:
+                shutil.copy2(source, fma_hpa_helm_dir / target_name)
+
+        # Copy helmfile
+        fma_hpa_helmfile = self._find_yaml(stack_path, "31_helmfile-fma-hpa")
+        if not fma_hpa_helmfile or not self._has_yaml_content(fma_hpa_helmfile):
+            context.logger.log_info(
+                "No FMA+HPA helmfile found, skipping EPP/Gateway deployment"
+            )
+            return
+
+        helmfile_work = fma_hpa_helm_dir / "helmfile.yaml"
+        shutil.copy2(fma_hpa_helmfile, helmfile_work)
+
+        # Deploy via helmfile
+        result = cmd.helmfile(
+            "apply",
+            "-f",
+            str(helmfile_work),
+            "--skip-diff-on-install",
+            "--skip-schema-validation",
+        )
+        if not result.success:
+            errors.append(f"Failed to deploy FMA+HPA EPP/Gateway: {result.stderr}")
+            return
+
+        # Wait for gateway pod
+        gateway_class = self._require_config(plan_config, "gateway", "className")
+        if gateway_class == "data-science-gateway-class":
+            gw_label = "gateway.istio.io/managed=istio.io-gateway-controller"
+        else:
+            gw_label = "app.kubernetes.io/name=llm-d-infra"
+
+        gateway_wait = cmd.wait_for_pods(
+            label=gw_label,
+            namespace=namespace,
+            timeout=900,
+            poll_interval=10,
+            description="FMA+HPA Gateway",
+        )
+        if not gateway_wait.success:
+            errors.append(f"FMA+HPA Gateway pod not ready: {gateway_wait.stderr}")
+            return
+
+        context.logger.log_info("FMA+HPA Gateway deployed")
+
+        # Apply the HPA object
+        hpa_yaml = self._find_yaml(stack_path, "29_fma-hpa")
+        if hpa_yaml and self._has_yaml_content(hpa_yaml):
+            result = cmd.kube("apply", "-f", str(hpa_yaml))
+            if not result.success:
+                errors.append(f"Failed to apply FMA HPA: {result.stderr}")
+                return
+            context.logger.log_info("FMA+HPA HorizontalPodAutoscaler applied")
+        else:
+            errors.append("FMA+HPA HPA template (29_fma-hpa) not found")
 
     def _propagate_standup_parameters(
         self, cmd: CommandExecutor, context: ExecutionContext, plan_config: dict

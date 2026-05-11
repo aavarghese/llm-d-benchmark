@@ -674,6 +674,312 @@ def write_controller_log(
         )
 
 
+@dataclass
+class FMAHpaConfig:
+    """Configuration for FMA+HPA benchmark mode."""
+
+    min_replicas: int = 1
+    max_replicas: int = 4
+    loadgen_workers: int = 300
+    loadgen_duration: int = 120
+    loadgen_max_tokens: int = 4096
+    loadgen_image: str = "curlimages/curl:latest"
+    gateway_url: str = ""
+
+
+def _create_loadgen_pod(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    v1: client.CoreV1Api,
+    namespace: str,
+    gateway_url: str,
+    model_name: str,
+    workers: int,
+    duration: int,
+    max_tokens: int,
+    image: str,
+) -> str:
+    """Create a loadgen pod that sends traffic through Gateway->EPP->vLLM."""
+
+    pod_name = f"fma-hpa-loadgen-{int(time.time())}"
+
+    script = f"""
+set -e
+echo "Starting loadgen: {workers} workers, {duration}s duration"
+echo "Target: {gateway_url}/v1/completions"
+end=$(($(date +%s) + {duration}))
+seq 1 {workers} | xargs -P {workers} -I{{}} sh -c '
+  while [ $(date +%s) -lt '"$end"' ]; do
+    curl -s -X POST "{gateway_url}/v1/completions" \\
+      -H "Content-Type: application/json" \\
+      -d "{{\\\"model\\\": \\\"{model_name}\\\", \\\"prompt\\\": \\\"Write a story about\\\", \\\"max_tokens\\\": {max_tokens}}}" \\
+      -o /dev/null -w "worker {{}}: %{{http_code}}\\n" || true
+    sleep 0.1
+  done
+'
+echo "Loadgen complete"
+"""
+
+    pod_manifest = client.V1Pod(
+        api_version="v1",
+        kind="Pod",
+        metadata=client.V1ObjectMeta(
+            name=pod_name,
+            namespace=namespace,
+            labels={"app": "fma-hpa-loadgen"},
+        ),
+        spec=client.V1PodSpec(
+            restart_policy="Never",
+            containers=[
+                client.V1Container(
+                    name="loadgen",
+                    image=image,
+                    command=["/bin/sh", "-c"],
+                    args=[script],
+                )
+            ],
+        ),
+    )
+
+    v1.create_namespaced_pod(namespace=namespace, body=pod_manifest)
+    logger.info("Created loadgen pod '%s' in namespace '%s'", pod_name, namespace)
+    return pod_name
+
+
+def _wait_for_pod_completion(
+    v1: client.CoreV1Api,
+    namespace: str,
+    pod_name: str,
+    timeout: float,
+) -> bool:
+    """Wait for a pod to reach Succeeded or Failed phase."""
+    start = time.perf_counter()
+    while True:
+        try:
+            pod = v1.read_namespaced_pod(name=pod_name, namespace=namespace)
+            phase = pod.status.phase
+            if phase in ("Succeeded", "Failed"):
+                logger.info(
+                    "Loadgen pod '%s' finished with phase '%s'", pod_name, phase
+                )
+                return phase == "Succeeded"
+        except ApiException:
+            logger.exception("Error reading loadgen pod '%s'", pod_name)
+
+        elapsed = time.perf_counter() - start
+        if elapsed > timeout:
+            logger.info(
+                "Timed out waiting for loadgen pod '%s' after %.1f secs",
+                pod_name,
+                elapsed,
+            )
+            return False
+        time.sleep(5)
+
+
+def _watch_hpa_scale_events(
+    apps_v1: client.AppsV1Api,
+    namespace: str,
+    replicaset_name: str,
+    duration: float,
+    poll_interval: float = 5.0,
+) -> list[tuple[float, int]]:
+    """Poll ReplicaSet replica count and record changes over time.
+
+    Returns a list of (timestamp, replica_count) tuples when the count changes.
+    """
+    events: list[tuple[float, int]] = []
+    last_count = -1
+    start = time.perf_counter()
+
+    while time.perf_counter() - start < duration:
+        try:
+            rs = apps_v1.read_namespaced_replica_set(replicaset_name, namespace)
+            current = rs.status.replicas or 0
+            if current != last_count:
+                ts = datetime.now().astimezone(timezone.utc).timestamp()
+                events.append((ts, current))
+                logger.info(
+                    "HPA scale event: ReplicaSet '%s' replicas %d -> %d",
+                    replicaset_name,
+                    last_count,
+                    current,
+                )
+                last_count = current
+        except ApiException:
+            logger.warning("Error polling ReplicaSet '%s'", replicaset_name)
+        time.sleep(poll_interval)
+
+    return events
+
+
+def benchmark_fma_hpa(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals,too-many-branches,too-many-statements
+    v1: client.CoreV1Api,
+    api: client.CustomObjectsApi,
+    apps_v1: client.AppsV1Api,
+    namespace: str,
+    endpoint_url: str,
+    fma_launcher_port: str,
+    benchmark_result: BenchmarkResult,
+    load_format: LoadFormat,
+    requests_dir: str,
+    hpa_config: FMAHpaConfig,
+    timeout: float,
+    wait: float,
+    write_log_per_process: bool,
+):
+    """FMA+HPA benchmark: measures actuation timing under HPA-driven scaling.
+
+    1. Start loadgen pod to generate traffic through Gateway->EPP->vLLM
+    2. Watch for HPA scale-up events on FMA ReplicaSet
+    3. Measure actuation timing for each new pod
+    4. Wait for loadgen completion
+    5. Observe scale-down
+    6. Record results
+    """
+
+    domain = urlparse(endpoint_url).netloc
+    arr = domain.split(".")
+    if len(arr) == 0:
+        raise RuntimeError(f"Unable to extract replicaset name from {domain}.")
+
+    replicaset_name = arr[0]
+    try:
+        apps_v1.read_namespaced_replica_set(
+            name=replicaset_name, namespace=namespace
+        )
+    except ApiException as e:
+        raise RuntimeError(f"Unable to read replicaset '{replicaset_name}'.") from e
+
+    # Discover the model name from the ISC for loadgen requests
+    model_name = ""
+    try:
+        iscs = api.list_namespaced_custom_object(
+            group="fma.llm-d.ai",
+            version="v1alpha1",
+            namespace=namespace,
+            plural="inferenceserverconfigs",
+        )
+        for isc in iscs.get("items", []):
+            options = (
+                isc.get("spec", {}).get("modelServerConfig", {}).get("options", "")
+            )
+            if "--model" in options:
+                parts = options.split()
+                for i, part in enumerate(parts):
+                    if part == "--model" and i + 1 < len(parts):
+                        model_name = parts[i + 1]
+                        break
+            if model_name:
+                break
+    except ApiException:
+        logger.exception("Error listing InferenceServerConfigs")
+
+    if not model_name:
+        logger.warning("Could not discover model name from ISC, using 'default'")
+        model_name = "default"
+
+    try:
+        fma_metrics = FMAMetrics(name="fma_hpa")
+        benchmark_result.extra_metrics.append(fma_metrics)
+
+        logger.info("Benchmark FMA+HPA start: launching loadgen...")
+
+        # Create loadgen pod
+        loadgen_pod_name = _create_loadgen_pod(
+            v1,
+            namespace,
+            hpa_config.gateway_url or endpoint_url,
+            model_name,
+            hpa_config.loadgen_workers,
+            hpa_config.loadgen_duration,
+            hpa_config.loadgen_max_tokens,
+            hpa_config.loadgen_image,
+        )
+
+        # Watch for HPA-driven scale events while loadgen runs
+        # Allow extra time beyond loadgen duration for scale-down observation
+        watch_duration = hpa_config.loadgen_duration + 120
+        scale_events = _watch_hpa_scale_events(
+            apps_v1, namespace, replicaset_name, watch_duration
+        )
+
+        logger.info(
+            "Observed %d scale events during HPA benchmark", len(scale_events)
+        )
+
+        # Get current requester pods for actuation timing
+        try:
+            rs = apps_v1.read_namespaced_replica_set(replicaset_name, namespace)
+            selector = rs.spec.selector.match_labels
+            if selector:
+                label_selector = ",".join(f"{k}={v}" for k, v in selector.items())
+                rs_uid = rs.metadata.uid
+                current_replicas = rs.status.replicas or 0
+
+                if current_replicas > 0:
+                    requester_infos = wait_for_requester_pods(
+                        v1,
+                        namespace,
+                        label_selector,
+                        rs_uid,
+                        current_replicas,
+                        replicaset_name,
+                        timeout,
+                    )
+
+                    if requester_infos:
+                        launcher_infos = get_fma_launcher_infos(
+                            v1,
+                            api,
+                            requester_infos,
+                            namespace,
+                            fma_launcher_port,
+                            benchmark_result,
+                        )
+
+                        for launcher_info in launcher_infos:
+                            launcher_info.actuation_condition = (
+                                FMAActuationCondition.T_WARM
+                            )
+
+                        fma_metrics_iteration = FMAMetricsIteration(
+                            1, launcher_infos
+                        )
+                        fma_metrics.iterations.append(fma_metrics_iteration)
+        except ApiException:
+            logger.exception("Error gathering HPA pod metrics")
+
+        # Wait for loadgen to complete
+        loadgen_timeout = hpa_config.loadgen_duration + 60
+        _wait_for_pod_completion(v1, namespace, loadgen_pod_name, loadgen_timeout)
+
+        # Clean up loadgen pod
+        try:
+            v1.delete_namespaced_pod(
+                name=loadgen_pod_name,
+                namespace=namespace,
+                body=client.V1DeleteOptions(grace_period_seconds=0),
+            )
+            logger.info("Deleted loadgen pod '%s'", loadgen_pod_name)
+        except ApiException:
+            logger.warning("Could not delete loadgen pod '%s'", loadgen_pod_name)
+
+        logger.info("Benchmark FMA+HPA complete")
+
+    finally:
+        write_controller_log(
+            v1,
+            namespace,
+            "app.kubernetes.io/component=dual-pods-controller",
+            requests_dir,
+        )
+        write_controller_log(
+            v1,
+            namespace,
+            "app.kubernetes.io/component=launcher-populator",
+            requests_dir,
+        )
+
+
 def benchmark_fma(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals,too-many-branches,too-many-statements
     v1: client.CoreV1Api,
     api: client.CustomObjectsApi,

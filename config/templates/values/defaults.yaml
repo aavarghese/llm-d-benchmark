@@ -1257,6 +1257,42 @@ fma:
   modelMountPath: /model-cache
   modelPvcName: model-pvc
 
+  # HPA-driven autoscaling (optional, extends FMA with HorizontalPodAutoscaler)
+  hpa:
+    enabled: false
+    minReplicas: 1
+    maxReplicas: 4
+    metrics:
+      eppQueueSize:
+        targetValue: 5
+      eppRunningRequests:
+        targetAverageValue: 10
+    behavior:
+      scaleUp:
+        stabilizationWindowSeconds: 0
+        policies:
+          - type: Percent
+            value: 100
+            periodSeconds: 15
+      scaleDown:
+        stabilizationWindowSeconds: 300
+        policies:
+          - type: Percent
+            value: 100
+            periodSeconds: 15
+    loadgen:
+      workers: 300
+      durationSeconds: 120
+      maxTokens: 4096
+      image: curlimages/curl:latest
+    # ISC overrides for HPA mode (InferencePool compatibility)
+    iscPort: 8000
+    maxSleepingInstances: 0
+    # InferencePool discovery labels added to ISC modelServerConfig.labels
+    iscLabels:
+      llm-d.ai/inference-serving: "true"
+      llm-d.ai/guide: "inference-scheduling"
+
 # ============================================================================
 # DOWNLOAD JOB CONFIGURATION
 # ============================================================================

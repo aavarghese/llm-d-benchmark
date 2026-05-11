@@ -22,7 +22,7 @@ from nop_functions import (
     benchmark_nop,
 )
 
-from fma_functions import benchmark_fma
+from fma_functions import benchmark_fma, benchmark_fma_hpa, FMAHpaConfig
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -85,6 +85,18 @@ def main():
         keys.extend(["LLMDBENCH_FMA_LAUNCHER_CONFIG_PORT", "LLMDBENCH_FMA_ITERATIONS"])
 
     envs.update(get_env_variables(keys))
+
+    fma_hpa_enabled = envs.get("LLMDBENCH_FMA_HPA_ENABLED", "false").lower() == "true"
+    if fma_hpa_enabled:
+        hpa_keys = [
+            "LLMDBENCH_FMA_HPA_MIN_REPLICAS",
+            "LLMDBENCH_FMA_HPA_MAX_REPLICAS",
+            "LLMDBENCH_FMA_HPA_LOADGEN_WORKERS",
+            "LLMDBENCH_FMA_HPA_LOADGEN_DURATION",
+            "LLMDBENCH_FMA_HPA_LOADGEN_MAX_TOKENS",
+            "LLMDBENCH_FMA_HPA_LOADGEN_IMAGE",
+        ]
+        envs.update(get_env_variables(hpa_keys))
     logger.info("Environment variables:")
     for key, value in envs.items():
         logger.info("  '%s': '%s'", key, value)
@@ -121,7 +133,37 @@ def main():
 
     benchmark_result = BenchmarkResult()
     benchmark_result.scenario.deploy_methods = ",".join(deploy_methods)
-    if fma_enabled:
+    if fma_enabled and fma_hpa_enabled:
+        try:
+            logger.info("Benchmark FMA+HPA start...")
+            hpa_config = FMAHpaConfig(
+                min_replicas=int(envs.get("LLMDBENCH_FMA_HPA_MIN_REPLICAS", "1")),
+                max_replicas=int(envs.get("LLMDBENCH_FMA_HPA_MAX_REPLICAS", "4")),
+                loadgen_workers=int(envs.get("LLMDBENCH_FMA_HPA_LOADGEN_WORKERS", "300")),
+                loadgen_duration=int(envs.get("LLMDBENCH_FMA_HPA_LOADGEN_DURATION", "120")),
+                loadgen_max_tokens=int(envs.get("LLMDBENCH_FMA_HPA_LOADGEN_MAX_TOKENS", "4096")),
+                loadgen_image=envs.get("LLMDBENCH_FMA_HPA_LOADGEN_IMAGE", "curlimages/curl:latest"),
+            )
+            benchmark_fma_hpa(
+                v1,
+                api,
+                apps_v1,
+                namespace,
+                endpoint_url,
+                fma_launcher_port,
+                benchmark_result,
+                load_format,
+                requests_dir,
+                hpa_config,
+                REQUEST_TIMEOUT,
+                MAX_VLLM_WAIT,
+                write_log_per_process,
+            )
+        except Exception:  # pylint: disable=broad-exception-caught
+            logger.exception("error on benchmark FMA+HPA")
+        finally:
+            logger.info("Benchmark FMA+HPA end")
+    elif fma_enabled:
         try:
             logger.info("Benchmark FMA launcher start...")
             benchmark_fma(

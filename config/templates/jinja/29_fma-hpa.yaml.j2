@@ -1,0 +1,48 @@
+{# ============================================================================
+   29_fma-hpa.yaml.j2
+
+   HorizontalPodAutoscaler for FMA ReplicaSet, driven by EPP external metrics
+   (epp_queue_size, epp_running_requests) via prometheus-adapter.
+
+   Only rendered when both fma.enabled and fma.hpa.enabled are true.
+   ============================================================================ #}
+{% if fma is defined and fma.enabled | default(false) and fma.hpa is defined and fma.hpa.enabled | default(false) %}
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: fma-hpa-{{ model_id_label }}
+  namespace: {{ namespace.name }}
+  labels:
+    app: fma-{{ model_id_label }}
+{% if fma.labels is defined %}
+{% for key, value in fma.labels.items() %}
+    {{ key }}: "{{ value }}"
+{% endfor %}
+{% endif %}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: ReplicaSet
+    name: fma-requester-{{ model_id_label }}
+  minReplicas: {{ fma.hpa.minReplicas }}
+  maxReplicas: {{ fma.hpa.maxReplicas }}
+  metrics:
+  - type: External
+    external:
+      metric:
+        name: epp_queue_size
+      target:
+        type: Value
+        value: "{{ fma.hpa.metrics.eppQueueSize.targetValue }}"
+  - type: External
+    external:
+      metric:
+        name: epp_running_requests
+      target:
+        type: AverageValue
+        averageValue: "{{ fma.hpa.metrics.eppRunningRequests.targetAverageValue }}"
+{% if fma.hpa.behavior is defined %}
+  behavior:
+{{ fma.hpa.behavior | toyaml | indent(4, first=True) }}
+{% endif %}
+{% endif %}

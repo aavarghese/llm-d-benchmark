@@ -1,0 +1,68 @@
+# OpenShift Container Platform CI/CD Scenario - FMA+HPA
+# Extends FMA mode with HPA-driven autoscaling via EPP external metrics.
+# Uses nop harness with a loadgen pod to generate traffic through
+# Gateway->EPP->vLLM and measure actuation timing under HPA-driven scaling.
+
+scenario:
+  - name: "ocp-cicd-fma-hpa"
+
+    model:
+      name: HuggingFaceTB/SmolLM2-360M-Instruct
+      shortName: smollm2-360m
+      path: models/HuggingFaceTB/SmolLM2-360M-Instruct
+      huggingfaceId: HuggingFaceTB/SmolLM2-360M-Instruct
+
+    affinity:
+      enabled: true
+      nodeSelector:
+        nvidia.com/gpu.product: NVIDIA-H100-80GB-HBM3
+
+    modelservice:
+      enabled: false
+    standalone:
+      enabled: false
+    fma:
+      enabled: true
+      iterations: 1
+      hpa:
+        enabled: true
+        minReplicas: 1
+        maxReplicas: 4
+        metrics:
+          eppQueueSize:
+            targetValue: 5
+          eppRunningRequests:
+            targetAverageValue: 10
+        behavior:
+          scaleUp:
+            stabilizationWindowSeconds: 0
+            policies:
+              - type: Percent
+                value: 100
+                periodSeconds: 15
+          scaleDown:
+            stabilizationWindowSeconds: 300
+            policies:
+              - type: Percent
+                value: 100
+                periodSeconds: 15
+        loadgen:
+          workers: 300
+          durationSeconds: 120
+          maxTokens: 4096
+          image: curlimages/curl:latest
+
+    vllmCommon:
+      priorityClassName: nightly-gpu-critical
+
+    workDir: /tmp/llmdbenchcicd-ocp/
+
+    harness:
+      name: nop
+      experimentProfile: nop.yaml
+      executable: llm-d-benchmark.py
+
+    images:
+      benchmark:
+        repository: ghcr.io/llm-d/llm-d-benchmark
+        tag: nightly

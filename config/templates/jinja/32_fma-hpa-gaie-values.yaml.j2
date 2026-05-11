@@ -1,0 +1,38 @@
+{# ============================================================================
+   32_fma-hpa-gaie-values.yaml.j2
+
+   InferencePool (EPP) chart values for FMA+HPA mode.
+   Configures EPP to discover vLLM backends on FMA launcher pods
+   using the ISC labels and fixed port 8000 required by InferencePool.
+
+   Only rendered when both fma.enabled and fma.hpa.enabled are true.
+   ============================================================================ #}
+{% if fma is defined and fma.enabled | default(false) and fma.hpa is defined and fma.hpa.enabled | default(false) %}
+inferenceExtension:
+  replicas: {{ inferenceExtension.replicas }}
+  image:
+    name: llm-d-inference-scheduler
+    hub: {{ images.inferenceScheduler.repository | replace('/llm-d-inference-scheduler', '') }}
+    tag: {{ images.inferenceScheduler.tag }}
+    pullPolicy: {{ images.inferenceScheduler.pullPolicy }}
+  extProcPort: {{ inferenceExtension.extProcPort }}
+  pluginsConfigFile: "{{ inferenceExtension.pluginsConfigFile }}"
+  monitoring:
+    interval: "{{ inferenceExtension.monitoring.interval | default('10s') }}"
+    prometheus:
+      enabled: {{ inferenceExtension.monitoring.prometheus.enabled | default(true) | lower }}
+      auth:
+        enabled: {{ inferenceExtension.monitoring.prometheus.auth.enabled | default(true) | lower }}
+        secretName: {{ inferenceExtension.monitoring.secretName | default('inference-gateway-sa-metrics-reader-secret') }}
+  flags:
+    v: "4"
+
+inferencePool:
+  targetPortNumber: {{ fma.hpa.iscPort }}
+  modelServerType: vllm
+  apiVersion: "inference.networking.k8s.io/v1"
+  modelServers:
+    matchLabels:
+      llm-d.ai/inference-serving: "true"
+      llm-d.ai/model: {{ model_id_label }}
+{% endif %}

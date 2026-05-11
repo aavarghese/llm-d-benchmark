@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import yaml
+
 from llmdbenchmark.executor.step import Step, StepResult, Phase
 from llmdbenchmark.executor.context import ExecutionContext
 from llmdbenchmark.executor.command import CommandExecutor
@@ -60,6 +62,9 @@ class WorkloadMonitoringStep(Step):
         if context.is_openshift and self._is_modelservice(context):
             self._apply_monitoring(cmd, context, errors)
 
+        if context.is_openshift and self._is_fma_hpa(context):
+            self._apply_fma_hpa_monitoring(cmd, context, errors)
+
         if errors:
             for e in errors:
                 context.logger.log_error(f"Validation error: {e}")
@@ -82,6 +87,23 @@ class WorkloadMonitoringStep(Step):
     def _is_modelservice(context: ExecutionContext) -> bool:
         """Check if the deployment includes modelservice."""
         return "modelservice" in getattr(context, "deployed_methods", [])
+
+    @staticmethod
+    def _is_fma_hpa(context: ExecutionContext) -> bool:
+        """Check if any rendered stack enables FMA+HPA."""
+        for stack_path in (context.rendered_stacks or []):
+            cfg_file = stack_path / "config.yaml"
+            if not cfg_file.exists():
+                continue
+            try:
+                with open(cfg_file, encoding="utf-8") as fh:
+                    cfg = yaml.safe_load(fh) or {}
+            except (OSError, yaml.YAMLError):
+                continue
+            fma = cfg.get("fma", {})
+            if fma.get("enabled") and fma.get("hpa", {}).get("enabled"):
+                return True
+        return False
 
     @staticmethod
     def _any_method_uses_accelerator(plan_config: dict) -> bool:
@@ -565,3 +587,73 @@ class WorkloadMonitoringStep(Step):
                 prom_ca_cert=prom_ca_cert,
                 errors=errors,
             )
+
+    def _apply_fma_hpa_monitoring(
+        self,
+        cmd: CommandExecutor,
+        context: ExecutionContext,
+        errors: list,
+    ) -> None:
+        """Install prometheus-adapter with EPP rules for FMA+HPA mode.
+
+        Uses the rendered 30_fma-prometheus-adapter-epp values as the helm
+        values file. Follows the same pattern as the WVA prometheus-adapter
+        install but with EPP metric rules instead of WVA rules.
+        """
+        monitoring_yaml = self._find_rendered_yaml(
+            context, "03_cluster-monitoring-config"
+        )
+        if monitoring_yaml:
+            result = cmd.kube("apply", "-f", str(monitoring_yaml))
+            if not result.success:
+                errors.append(
+                    f"Failed to apply monitoring configuration for FMA+HPA: "
+                    f"{result.stderr}"
+                )
+                return
+            context.logger.log_info(
+                "User workload monitoring configured for FMA+HPA"
+            )
+
+        for stack_path in (context.rendered_stacks or []):
+            cfg_file = stack_path / "config.yaml"
+            if not cfg_file.exists():
+                continue
+            try:
+                with open(cfg_file, encoding="utf-8") as fh:
+                    cfg = yaml.safe_load(fh) or {}
+            except (OSError, yaml.YAMLError):
+                continue
+
+            fma = cfg.get("fma", {})
+            if not (fma.get("enabled") and fma.get("hpa", {}).get("enabled")):
+                continue
+
+            monitoring_ns = (
+                cfg.get("openshiftMonitoring", {})
+                .get(
+                    "userWorkloadMonitoringNamespace",
+                    "openshift-user-workload-monitoring",
+                )
+            )
+
+            prom_ca_cert = wva_mod.extract_prometheus_ca_cert(cmd, context.logger)
+            if not prom_ca_cert:
+                context.logger.log_warning(
+                    "Could not extract Prometheus CA cert for FMA+HPA. "
+                    "prometheus-adapter will not be installed -- HPA will "
+                    "not receive EPP metrics for autoscaling."
+                )
+                return
+
+            wva_mod.install_prometheus_adapter_with_values(
+                cmd=cmd,
+                context=context,
+                plan_config=cfg,
+                stack_path=stack_path,
+                monitoring_ns=monitoring_ns,
+                prom_ca_cert=prom_ca_cert,
+                values_template_name="30_fma-prometheus-adapter-epp",
+                errors=errors,
+            )
+            break

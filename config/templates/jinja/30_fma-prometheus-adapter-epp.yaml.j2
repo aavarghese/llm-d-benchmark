@@ -1,0 +1,66 @@
+{# ============================================================================
+   30_fma-prometheus-adapter-epp.yaml.j2
+
+   Helm values overlay for prometheus-community/prometheus-adapter chart.
+   Adds EPP metric rules for FMA+HPA mode so that epp_queue_size and
+   epp_running_requests are available as Kubernetes external metrics.
+
+   Only rendered when both fma.enabled and fma.hpa.enabled are true.
+   ============================================================================ #}
+{% if fma is defined and fma.enabled | default(false) and fma.hpa is defined and fma.hpa.enabled | default(false) %}
+prometheus:
+  url: https://thanos-querier.openshift-monitoring.svc.cluster.local
+  port: 9091
+
+rules:
+  external:
+  - seriesQuery: 'inference_extension_flow_control_queue_size{namespace!=""}'
+    resources:
+      overrides:
+        namespace:
+          resource: "namespace"
+    name:
+      as: "epp_queue_size"
+    metricsQuery: 'sum(inference_extension_flow_control_queue_size{namespace="{{ namespace.name }}"})'
+  - seriesQuery: 'inference_objective_running_requests{namespace!=""}'
+    resources:
+      overrides:
+        namespace:
+          resource: "namespace"
+    name:
+      as: "epp_running_requests"
+    metricsQuery: 'sum(inference_objective_running_requests{namespace="{{ namespace.name }}"})'
+
+replicas: 2
+logLevel: 4
+
+tls:
+  enable: false
+
+extraVolumes:
+  - name: prometheus-ca
+    configMap:
+      name: prometheus-ca
+
+extraVolumeMounts:
+  - name: prometheus-ca
+    mountPath: /etc/prometheus-ca
+    readOnly: true
+
+extraArguments:
+  - --prometheus-ca-file=/etc/prometheus-ca/ca.crt
+  - --prometheus-token-file=/var/run/secrets/kubernetes.io/serviceaccount/token
+
+podSecurityContext:
+  fsGroup: null
+
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop: ["ALL"]
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+  runAsUser: null
+  seccompProfile:
+    type: RuntimeDefault
+{% endif %}
