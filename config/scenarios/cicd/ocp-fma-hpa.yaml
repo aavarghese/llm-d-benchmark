@@ -23,7 +23,7 @@ scenario:
       enabled: false
     fma:
       enabled: true
-      iterations: 1
+      iterations: 5
       hpa:
         enabled: true
         minReplicas: 1

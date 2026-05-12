@@ -1285,8 +1285,6 @@ fma:
       durationSeconds: 120
       maxTokens: 4096
       image: curlimages/curl:latest
-    # ISC overrides for HPA mode (InferencePool compatibility)
-    iscPort: 8000
     maxSleepingInstances: 0
     # InferencePool discovery labels added to ISC modelServerConfig.labels
     iscLabels:

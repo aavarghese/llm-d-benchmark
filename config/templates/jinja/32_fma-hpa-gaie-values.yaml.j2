@@ -3,7 +3,7 @@
 
    InferencePool (EPP) chart values for FMA+HPA mode.
    Configures EPP to discover vLLM backends on FMA launcher pods
-   using the ISC labels and fixed port 8000 required by InferencePool.
+   using the ISC labels and port 8005 (same as plain FMA mode).
 
    Only rendered when both fma.enabled and fma.hpa.enabled are true.
    ============================================================================ #}
@@ -28,7 +28,7 @@ inferenceExtension:
     v: "4"
 
 inferencePool:
-  targetPortNumber: {{ fma.hpa.iscPort }}
+  targetPortNumber: 8005
   modelServerType: vllm
   apiVersion: "inference.networking.k8s.io/v1"
   modelServers:

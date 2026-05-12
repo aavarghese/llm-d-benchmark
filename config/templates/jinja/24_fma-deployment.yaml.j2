@@ -32,16 +32,10 @@ spec:
     env_vars:
       HF_HOME: "{{ fma.modelMountPath }}"
       VLLM_LOGGING_LEVEL: DEBUG
-{% if not (fma.hpa is defined and fma.hpa.enabled | default(false)) %}
       VLLM_SERVER_DEV_MODE: "1"
-{% endif %}
       VLLM_USE_V1: "1"
     options: "--model {{ model.name }} --enable-sleep-mode --no-enable-prefix-caching --load-format auto --gpu-memory-utilization 0.95 --tensor-parallel-size 1"
-{% if fma.hpa is defined and fma.hpa.enabled | default(false) %}
-    port: {{ fma.hpa.iscPort }}
-{% else %}
     port: 8005
-{% endif %}
 ---
 apiVersion: fma.llm-d.ai/v1alpha1
 kind: LauncherConfig

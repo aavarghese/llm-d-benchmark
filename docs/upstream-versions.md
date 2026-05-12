@@ -8,8 +8,8 @@
 > `auto` Helm/image versions are resolved against live registries at
 > generation time via the existing `VersionResolver`.
 
-- Generated at: `2026-05-11 13:57:56` (UTC)
-- Generated against git ref: `186297dbf350dba89a8ea375cef040b787cf465b`
+- Generated at: `2026-05-12 21:16:40` (UTC)
+- Generated against git ref: `2996522af6caf49d15f6be73b0a08109273697fc`
 
 ## System Tool Dependencies
 
@@ -126,7 +126,7 @@ annotated with their `pyproject.toml` line.
 | **distlib** | `0.4.0` | version | (transitive in `.venv`) | [distlib (PyPI)](https://pypi.org/project/distlib/) |
 | **distro** | `1.9.0` | version | (transitive in `.venv`) | [distro (PyPI)](https://pypi.org/project/distro/) |
 | **durationpy** | `0.10` | version | (transitive in `.venv`) | [durationpy (PyPI)](https://pypi.org/project/durationpy/) |
-| **fastapi** | `0.136.0` | version | (transitive in `.venv`) | [fastapi (PyPI)](https://pypi.org/project/fastapi/) |
+| **fastapi** | `0.136.1` | version | (transitive in `.venv`) | [fastapi (PyPI)](https://pypi.org/project/fastapi/) |
 | **filelock** | `3.24.3` | version | (transitive in `.venv`) | [filelock (PyPI)](https://pypi.org/project/filelock/) |
 | **fonttools** | `4.61.1` | version | (transitive in `.venv`) | [fonttools (PyPI)](https://pypi.org/project/fonttools/) |
 | **frozenlist** | `1.8.0` | version | (transitive in `.venv`) | [frozenlist (PyPI)](https://pypi.org/project/frozenlist/) |
@@ -141,11 +141,11 @@ annotated with their `pyproject.toml` line.
 | **google-resumable-media** | `2.9.0` | version | (transitive in `.venv`) | [google-resumable-media (PyPI)](https://pypi.org/project/google-resumable-media/) |
 | **googleapis-common-protos** | `1.75.0` | version | (transitive in `.venv`) | [googleapis-common-protos (PyPI)](https://pypi.org/project/googleapis-common-protos/) |
 | **h11** | `0.16.0` | version | (transitive in `.venv`) | [h11 (PyPI)](https://pypi.org/project/h11/) |
-| **hf-xet** | `1.3.1` | version | (transitive in `.venv`) | [hf-xet (PyPI)](https://pypi.org/project/hf-xet/) |
+| **hf-xet** | `1.5.0` | version | (transitive in `.venv`) | [hf-xet (PyPI)](https://pypi.org/project/hf-xet/) |
 | **httpcore** | `1.0.9` | version | (transitive in `.venv`) | [httpcore (PyPI)](https://pypi.org/project/httpcore/) |
 | **httptools** | `0.7.1` | version | (transitive in `.venv`) | [httptools (PyPI)](https://pypi.org/project/httptools/) |
 | **httpx** | `0.28.1` | version | (transitive in `.venv`) | [httpx (PyPI)](https://pypi.org/project/httpx/) |
-| **huggingface_hub** | `1.4.1` | version | `pyproject.toml` line 15 (direct) | [huggingface_hub (PyPI)](https://pypi.org/project/huggingface-hub/) |
+| **huggingface_hub** | `1.14.0` | version | `pyproject.toml` line 15 (direct) | [huggingface_hub (PyPI)](https://pypi.org/project/huggingface-hub/) |
 | **identify** | `2.6.19` | version | (transitive in `.venv`) | [identify (PyPI)](https://pypi.org/project/identify/) |
 | **idna** | `3.11` | version | (transitive in `.venv`) | [idna (PyPI)](https://pypi.org/project/idna/) |
 | **iniconfig** | `2.3.0` | version | (transitive in `.venv`) | [iniconfig (PyPI)](https://pypi.org/project/iniconfig/) |
@@ -178,13 +178,13 @@ annotated with their `pyproject.toml` line.
 | **proto-plus** | `1.28.0` | version | (transitive in `.venv`) | [proto-plus (PyPI)](https://pypi.org/project/proto-plus/) |
 | **protobuf** | `7.34.1` | version | (transitive in `.venv`) | [protobuf (PyPI)](https://pypi.org/project/protobuf/) |
 | **psutil** | `7.2.2` | version | (transitive in `.venv`) | [psutil (PyPI)](https://pypi.org/project/psutil/) |
-| **psycopg2-binary** | `2.9.11` | version | (transitive in `.venv`) | [psycopg2-binary (PyPI)](https://pypi.org/project/psycopg2-binary/) |
+| **psycopg2-binary** | `2.9.12` | version | (transitive in `.venv`) | [psycopg2-binary (PyPI)](https://pypi.org/project/psycopg2-binary/) |
 | **pyasn1** | `0.6.3` | version | (transitive in `.venv`) | [pyasn1 (PyPI)](https://pypi.org/project/pyasn1/) |
 | **pyasn1_modules** | `0.4.2` | version | (transitive in `.venv`) | [pyasn1_modules (PyPI)](https://pypi.org/project/pyasn1-modules/) |
 | **pycparser** | `3.0` | version | (transitive in `.venv`) | [pycparser (PyPI)](https://pypi.org/project/pycparser/) |
-| **pydantic** | `2.12.5` | version | `pyproject.toml` line 17 (direct) | [pydantic (PyPI)](https://pypi.org/project/pydantic/) |
-| **pydantic-settings** | `2.13.1` | version | (transitive in `.venv`) | [pydantic-settings (PyPI)](https://pypi.org/project/pydantic-settings/) |
-| **pydantic_core** | `2.41.5` | version | (transitive in `.venv`) | [pydantic_core (PyPI)](https://pypi.org/project/pydantic-core/) |
+| **pydantic** | `2.13.3` | version | `pyproject.toml` line 17 (direct) | [pydantic (PyPI)](https://pypi.org/project/pydantic/) |
+| **pydantic-settings** | `2.14.0` | version | (transitive in `.venv`) | [pydantic-settings (PyPI)](https://pypi.org/project/pydantic-settings/) |
+| **pydantic_core** | `2.46.3` | version | (transitive in `.venv`) | [pydantic_core (PyPI)](https://pypi.org/project/pydantic-core/) |
 | **Pygments** | `2.19.2` | version | (transitive in `.venv`) | [Pygments (PyPI)](https://pypi.org/project/pygments/) |
 | **PyJWT** | `2.12.1` | version | (transitive in `.venv`) | [PyJWT (PyPI)](https://pypi.org/project/pyjwt/) |
 | **pykube-ng** | `23.6.0` | version | `pyproject.toml` line 12 (direct) | [pykube-ng (PyPI)](https://pypi.org/project/pykube-ng/) |
@@ -210,13 +210,13 @@ annotated with their `pyproject.toml` line.
 | **tabulate** | `0.10.0` | version | (transitive in `.venv`) | [tabulate (PyPI)](https://pypi.org/project/tabulate/) |
 | **tokenizers** | `0.22.2` | version | (transitive in `.venv`) | [tokenizers (PyPI)](https://pypi.org/project/tokenizers/) |
 | **tqdm** | `4.67.3` | version | (transitive in `.venv`) | [tqdm (PyPI)](https://pypi.org/project/tqdm/) |
-| **transformers** | `5.2.0` | version | `pyproject.toml` line 16 (direct) | [transformers (PyPI)](https://pypi.org/project/transformers/) |
+| **transformers** | `5.8.0` | version | `pyproject.toml` line 16 (direct) | [transformers (PyPI)](https://pypi.org/project/transformers/) |
 | **typer** | `0.24.1` | version | (transitive in `.venv`) | [typer (PyPI)](https://pypi.org/project/typer/) |
 | **typer-slim** | `0.24.0` | version | (transitive in `.venv`) | [typer-slim (PyPI)](https://pypi.org/project/typer-slim/) |
 | **typing-inspection** | `0.4.2` | version | (transitive in `.venv`) | [typing-inspection (PyPI)](https://pypi.org/project/typing-inspection/) |
 | **typing_extensions** | `4.15.0` | version | (transitive in `.venv`) | [typing_extensions (PyPI)](https://pypi.org/project/typing-extensions/) |
 | **urllib3** | `2.6.3` | version | (transitive in `.venv`) | [urllib3 (PyPI)](https://pypi.org/project/urllib3/) |
-| **uvicorn** | `0.44.0` | version | (transitive in `.venv`) | [uvicorn (PyPI)](https://pypi.org/project/uvicorn/) |
+| **uvicorn** | `0.46.0` | version | (transitive in `.venv`) | [uvicorn (PyPI)](https://pypi.org/project/uvicorn/) |
 | **uvloop** | `0.22.1` | version | (transitive in `.venv`) | [uvloop (PyPI)](https://pypi.org/project/uvloop/) |
 | **virtualenv** | `21.2.4` | version | (transitive in `.venv`) | [virtualenv (PyPI)](https://pypi.org/project/virtualenv/) |
 | **watchfiles** | `1.1.1` | version | (transitive in `.venv`) | [watchfiles (PyPI)](https://pypi.org/project/watchfiles/) |

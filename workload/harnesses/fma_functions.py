@@ -811,46 +811,26 @@ def _watch_hpa_scale_events(
     return events
 
 
-def benchmark_fma_hpa(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals,too-many-branches,too-many-statements
-    v1: client.CoreV1Api,
-    api: client.CustomObjectsApi,
-    apps_v1: client.AppsV1Api,
-    namespace: str,
-    endpoint_url: str,
-    fma_launcher_port: str,
-    benchmark_result: BenchmarkResult,
-    load_format: LoadFormat,
-    requests_dir: str,
-    hpa_config: FMAHpaConfig,
-    timeout: float,
-    wait: float,
-    write_log_per_process: bool,
-):
-    """FMA+HPA benchmark: measures actuation timing under HPA-driven scaling.
-
-    1. Start loadgen pod to generate traffic through Gateway->EPP->vLLM
-    2. Watch for HPA scale-up events on FMA ReplicaSet
-    3. Measure actuation timing for each new pod
-    4. Wait for loadgen completion
-    5. Observe scale-down
-    6. Record results
-    """
-
+def _get_replicaset_info(
+    apps_v1: client.AppsV1Api, endpoint_url: str, namespace: str
+) -> tuple[str, Any]:
+    """Extract replicaset name from endpoint URL and read it."""
     domain = urlparse(endpoint_url).netloc
     arr = domain.split(".")
     if len(arr) == 0:
         raise RuntimeError(f"Unable to extract replicaset name from {domain}.")
-
     replicaset_name = arr[0]
     try:
-        apps_v1.read_namespaced_replica_set(
+        rs = apps_v1.read_namespaced_replica_set(
             name=replicaset_name, namespace=namespace
         )
     except ApiException as e:
         raise RuntimeError(f"Unable to read replicaset '{replicaset_name}'.") from e
+    return replicaset_name, rs
 
-    # Discover the model name from the ISC for loadgen requests
-    model_name = ""
+
+def _discover_model_name(api: client.CustomObjectsApi, namespace: str) -> str:
+    """Discover model name from InferenceServerConfig objects."""
     try:
         iscs = api.list_namespaced_custom_object(
             group="fma.llm-d.ai",
@@ -866,118 +846,245 @@ def benchmark_fma_hpa(  # pylint: disable=too-many-arguments,too-many-positional
                 parts = options.split()
                 for i, part in enumerate(parts):
                     if part == "--model" and i + 1 < len(parts):
-                        model_name = parts[i + 1]
-                        break
-            if model_name:
-                break
+                        return parts[i + 1]
     except ApiException:
         logger.exception("Error listing InferenceServerConfigs")
+    logger.warning("Could not discover model name from ISC, using 'default'")
+    return "default"
 
-    if not model_name:
-        logger.warning("Could not discover model name from ISC, using 'default'")
-        model_name = "default"
 
-    try:
-        fma_metrics = FMAMetrics(name="fma_hpa")
-        benchmark_result.extra_metrics.append(fma_metrics)
+def _observe_and_measure_launchers(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    v1: client.CoreV1Api,
+    api: client.CustomObjectsApi,
+    requester_infos: list[FMARequesterInfo],
+    namespace: str,
+    fma_launcher_port: str,
+    benchmark_result: BenchmarkResult,
+    timeout: float,
+    wait: float,
+) -> list[FMALauncherInfo]:
+    """Given ready requester pods, discover launchers, wait for vLLM, measure TTFT."""
+    launcher_infos = get_fma_launcher_infos(
+        v1, api, requester_infos, namespace, fma_launcher_port, benchmark_result
+    )
+    for launcher_info in launcher_infos:
+        try:
+            wait_for_launcher(launcher_info.launcher_endpoint, timeout, wait)
+            instance_ids = get_vllm_server_instances(
+                launcher_info.launcher_endpoint, timeout
+            )
+            inspect_vllm_instances(instance_ids, launcher_info, wait)
+            launcher_info.vllm_instance_id = (
+                instance_ids[-1] if len(instance_ids) > 0 else None
+            )
+            if launcher_info.vllm_instance_id is None:
+                continue
+            wait_for_vllm(launcher_info.vllm_endpoint, timeout, wait)
+            model = get_vllm_model(launcher_info.vllm_endpoint, timeout)
+            launcher_info.ttft = calculate_vllm_ttft(
+                launcher_info.vllm_endpoint, model, timeout
+            )
+        except Exception as e:
+            raise RuntimeError(
+                f"error on benchmark FMA '{launcher_info.name}' launcher"
+            ) from e
+    return launcher_infos
 
-        logger.info("Benchmark FMA+HPA start: launching loadgen...")
 
-        # Create loadgen pod
-        loadgen_pod_name = _create_loadgen_pod(
-            v1,
-            namespace,
-            hpa_config.gateway_url or endpoint_url,
-            model_name,
-            hpa_config.loadgen_workers,
-            hpa_config.loadgen_duration,
-            hpa_config.loadgen_max_tokens,
-            hpa_config.loadgen_image,
-        )
+def _write_controller_logs(
+    v1: client.CoreV1Api, namespace: str, requests_dir: str
+) -> None:
+    """Write dual-pods-controller and launcher-populator logs."""
+    write_controller_log(
+        v1,
+        namespace,
+        "app.kubernetes.io/component=dual-pods-controller",
+        requests_dir,
+    )
+    write_controller_log(
+        v1,
+        namespace,
+        "app.kubernetes.io/component=launcher-populator",
+        requests_dir,
+    )
 
-        # Watch for HPA-driven scale events while loadgen runs
-        # Allow extra time beyond loadgen duration for scale-down observation
-        watch_duration = hpa_config.loadgen_duration + 120
-        scale_events = _watch_hpa_scale_events(
-            apps_v1, namespace, replicaset_name, watch_duration
-        )
 
-        logger.info(
-            "Observed %d scale events during HPA benchmark", len(scale_events)
-        )
-
-        # Get current requester pods for actuation timing
+def _wait_for_hpa_scaledown(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    apps_v1: client.AppsV1Api,
+    namespace: str,
+    replicaset_name: str,
+    target_replicas: int,
+    timeout: float,
+    poll_interval: float = 10.0,
+) -> bool:
+    """Wait for HPA to scale ReplicaSet back down to target_replicas."""
+    start = time.perf_counter()
+    while True:
         try:
             rs = apps_v1.read_namespaced_replica_set(replicaset_name, namespace)
-            selector = rs.spec.selector.match_labels
-            if selector:
-                label_selector = ",".join(f"{k}={v}" for k, v in selector.items())
-                rs_uid = rs.metadata.uid
-                current_replicas = rs.status.replicas or 0
+            current = rs.status.replicas or 0
+            if current <= target_replicas:
+                logger.info(
+                    "HPA scale-down complete: ReplicaSet '%s' at %d replicas",
+                    replicaset_name,
+                    current,
+                )
+                return True
+        except ApiException:
+            logger.warning("Error polling ReplicaSet '%s' during scale-down", replicaset_name)
 
-                if current_replicas > 0:
-                    requester_infos = wait_for_requester_pods(
-                        v1,
-                        namespace,
-                        label_selector,
-                        rs_uid,
-                        current_replicas,
-                        replicaset_name,
-                        timeout,
+        elapsed = time.perf_counter() - start
+        if elapsed > timeout:
+            logger.info(
+                "Timed out waiting for HPA scale-down of '%s' after %.1f secs",
+                replicaset_name,
+                elapsed,
+            )
+            return False
+        time.sleep(poll_interval)
+
+
+def benchmark_fma_hpa(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals
+    v1: client.CoreV1Api,
+    api: client.CustomObjectsApi,
+    apps_v1: client.AppsV1Api,
+    namespace: str,
+    endpoint_url: str,
+    fma_launcher_port: str,
+    benchmark_result: BenchmarkResult,
+    load_format: LoadFormat,
+    requests_dir: str,
+    hpa_config: FMAHpaConfig,
+    iterations: int,
+    timeout: float,
+    wait: float,
+    write_log_per_process: bool,
+):
+    """FMA+HPA benchmark: measures actuation timing under HPA-driven scaling.
+
+    Each iteration:
+      1. Start loadgen → HPA scales up
+      2. Measure actuation timing for scaled-up pods
+      3. Stop loadgen → wait for HPA scale-down
+    """
+
+    replicaset_name, _ = _get_replicaset_info(apps_v1, endpoint_url, namespace)
+    model_name = _discover_model_name(api, namespace)
+
+    fma_metrics = FMAMetrics(name="fma_hpa")
+    benchmark_result.extra_metrics.append(fma_metrics)
+
+    try:
+        for iteration in range(1, iterations + 1):
+            try:
+                logger.info("Benchmark FMA+HPA iteration '%d' start...", iteration)
+
+                # 1. Start loadgen to trigger HPA scale-up
+                loadgen_pod_name = _create_loadgen_pod(
+                    v1,
+                    namespace,
+                    hpa_config.gateway_url or endpoint_url,
+                    model_name,
+                    hpa_config.loadgen_workers,
+                    hpa_config.loadgen_duration,
+                    hpa_config.loadgen_max_tokens,
+                    hpa_config.loadgen_image,
+                )
+
+                # 2. Watch for HPA scale events while loadgen runs
+                watch_duration = hpa_config.loadgen_duration + 120
+                scale_events = _watch_hpa_scale_events(
+                    apps_v1, namespace, replicaset_name, watch_duration
+                )
+                logger.info(
+                    "Iteration %d: observed %d scale events",
+                    iteration,
+                    len(scale_events),
+                )
+
+                # 3. Measure current pods using shared observation logic
+                try:
+                    rs = apps_v1.read_namespaced_replica_set(
+                        replicaset_name, namespace
+                    )
+                    selector = rs.spec.selector.match_labels
+                    if selector:
+                        label_selector = ",".join(
+                            f"{k}={v}" for k, v in selector.items()
+                        )
+                        current_replicas = rs.status.replicas or 0
+                        if current_replicas > 0:
+                            requester_infos = wait_for_requester_pods(
+                                v1,
+                                namespace,
+                                label_selector,
+                                rs.metadata.uid,
+                                current_replicas,
+                                replicaset_name,
+                                timeout,
+                            )
+                            if requester_infos:
+                                launcher_infos = _observe_and_measure_launchers(
+                                    v1,
+                                    api,
+                                    requester_infos,
+                                    namespace,
+                                    fma_launcher_port,
+                                    benchmark_result,
+                                    timeout,
+                                    wait,
+                                )
+                                for li in launcher_infos:
+                                    li.actuation_condition = (
+                                        FMAActuationCondition.T_WARM
+                                    )
+                                fma_metrics.iterations.append(
+                                    FMAMetricsIteration(iteration, launcher_infos)
+                                )
+                except ApiException:
+                    logger.exception(
+                        "Error gathering HPA pod metrics in iteration %d",
+                        iteration,
                     )
 
-                    if requester_infos:
-                        launcher_infos = get_fma_launcher_infos(
-                            v1,
-                            api,
-                            requester_infos,
-                            namespace,
-                            fma_launcher_port,
-                            benchmark_result,
-                        )
+                # 4. Wait for loadgen completion + cleanup
+                _wait_for_pod_completion(
+                    v1,
+                    namespace,
+                    loadgen_pod_name,
+                    hpa_config.loadgen_duration + 60,
+                )
+                try:
+                    v1.delete_namespaced_pod(
+                        name=loadgen_pod_name,
+                        namespace=namespace,
+                        body=client.V1DeleteOptions(grace_period_seconds=0),
+                    )
+                    logger.info("Deleted loadgen pod '%s'", loadgen_pod_name)
+                except ApiException:
+                    logger.warning(
+                        "Could not delete loadgen pod '%s'", loadgen_pod_name
+                    )
 
-                        for launcher_info in launcher_infos:
-                            launcher_info.actuation_condition = (
-                                FMAActuationCondition.T_WARM
-                            )
+                # 5. Wait for HPA to scale back down before next iteration
+                if iteration < iterations:
+                    scaledown_timeout = 600.0
+                    _wait_for_hpa_scaledown(
+                        apps_v1,
+                        namespace,
+                        replicaset_name,
+                        hpa_config.min_replicas,
+                        scaledown_timeout,
+                    )
 
-                        fma_metrics_iteration = FMAMetricsIteration(
-                            1, launcher_infos
-                        )
-                        fma_metrics.iterations.append(fma_metrics_iteration)
-        except ApiException:
-            logger.exception("Error gathering HPA pod metrics")
+            finally:
+                logger.info(
+                    "Benchmark FMA+HPA iteration '%d' end.", iteration
+                )
 
-        # Wait for loadgen to complete
-        loadgen_timeout = hpa_config.loadgen_duration + 60
-        _wait_for_pod_completion(v1, namespace, loadgen_pod_name, loadgen_timeout)
-
-        # Clean up loadgen pod
-        try:
-            v1.delete_namespaced_pod(
-                name=loadgen_pod_name,
-                namespace=namespace,
-                body=client.V1DeleteOptions(grace_period_seconds=0),
-            )
-            logger.info("Deleted loadgen pod '%s'", loadgen_pod_name)
-        except ApiException:
-            logger.warning("Could not delete loadgen pod '%s'", loadgen_pod_name)
-
-        logger.info("Benchmark FMA+HPA complete")
-
+        logger.info("Benchmark FMA+HPA complete (%d iterations)", iterations)
     finally:
-        write_controller_log(
-            v1,
-            namespace,
-            "app.kubernetes.io/component=dual-pods-controller",
-            requests_dir,
-        )
-        write_controller_log(
-            v1,
-            namespace,
-            "app.kubernetes.io/component=launcher-populator",
-            requests_dir,
-        )
+        _write_controller_logs(v1, namespace, requests_dir)
 
 
 def benchmark_fma(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals,too-many-branches,too-many-statements
@@ -997,34 +1104,23 @@ def benchmark_fma(  # pylint: disable=too-many-arguments,too-many-positional-arg
 ):
     """FMA benchmark"""
 
-    domain = urlparse(endpoint_url).netloc
-    arr = domain.split(".")
-    if len(arr) == 0:
-        raise RuntimeError(f"Unable to extract replicaset name from {domain}.")
-
-    replicaset_name = arr[0]
-    replicaset = None
-    try:
-        replicaset = apps_v1.read_namespaced_replica_set(
-            name=replicaset_name, namespace=namespace
-        )
-    except ApiException as e:
-        raise RuntimeError(f"Unable to read replicaset '{replicaset_name}'.") from e
+    replicaset_name, replicaset = _get_replicaset_info(
+        apps_v1, endpoint_url, namespace
+    )
 
     # make sure to start with 0 replicas
     desired = replicaset.spec.replicas or 0
     if desired > 0:
-        # should start with 0 replicas, scale to it
         if (
             scale_replicaset(v1, apps_v1, replicaset_name, namespace, 0, FMA_TIMEOUT)
             is None
         ):
             raise RuntimeError(f"Unable to scale replicaset {replicaset_name} to 0.")
 
-    try:  # pylint: disable=too-many-nested-blocks
+    try:
         fma_metrics = FMAMetrics()
         benchmark_result.extra_metrics.append(fma_metrics)
-        for iteration in range(1, iterations + 1):  # pylint: disable=too-many-nested-blocks
+        for iteration in range(1, iterations + 1):
             try:
                 logger.info("Benchmark FMA iteration '%d' start...", iteration)
                 # scale replicaset to 1
@@ -1036,40 +1132,17 @@ def benchmark_fma(  # pylint: disable=too-many-arguments,too-many-positional-arg
                         f"Unable to scale replicaset {replicaset_name} to 1."
                     )
 
-                launcher_infos = get_fma_launcher_infos(
+                # Observe and measure launchers (shared logic)
+                launcher_infos = _observe_and_measure_launchers(
                     v1,
                     api,
                     requester_infos,
                     namespace,
                     fma_launcher_port,
                     benchmark_result,
+                    timeout,
+                    wait,
                 )
-                for launcher_info in launcher_infos:
-                    try:
-                        wait_for_launcher(
-                            launcher_info.launcher_endpoint, timeout, wait
-                        )
-                        instance_ids = get_vllm_server_instances(
-                            launcher_info.launcher_endpoint, timeout
-                        )
-                        inspect_vllm_instances(instance_ids, launcher_info, wait)
-                        launcher_info.vllm_instance_id = (
-                            instance_ids[-1] if len(instance_ids) > 0 else None
-                        )
-                        if launcher_info.vllm_instance_id is None:
-                            continue
-
-                        wait_for_vllm(launcher_info.vllm_endpoint, timeout, wait)
-                        model = get_vllm_model(launcher_info.vllm_endpoint, timeout)
-                        launcher_info.ttft = calculate_vllm_ttft(
-                            launcher_info.vllm_endpoint,
-                            model,
-                            timeout,
-                        )
-                    except Exception as e:
-                        raise RuntimeError(
-                            f"error on benchmark FMA '{launcher_info.name}' launcher"
-                        ) from e
 
                 # scale replicaset to 0
                 if (
@@ -1082,11 +1155,15 @@ def benchmark_fma(  # pylint: disable=too-many-arguments,too-many-positional-arg
                         f"Unable to scale replicaset {replicaset_name} to 0."
                     )
 
+                # Post-scaledown: classify actuation condition
                 for launcher_info in launcher_infos:
                     try:
                         if launcher_info.vllm_instance_id is None:
                             continue
 
+                        model = get_vllm_model(
+                            launcher_info.vllm_endpoint, timeout
+                        )
                         populate_benchmark(
                             VllmLauncherInfo(
                                 launcher_info.v1,
@@ -1156,15 +1233,4 @@ def benchmark_fma(  # pylint: disable=too-many-arguments,too-many-positional-arg
             finally:
                 logger.info("Benchmark FMA iteration '%d' end.", iteration)
     finally:
-        write_controller_log(
-            v1,
-            namespace,
-            "app.kubernetes.io/component=dual-pods-controller",
-            requests_dir,
-        )
-        write_controller_log(
-            v1,
-            namespace,
-            "app.kubernetes.io/component=launcher-populator",
-            requests_dir,
-        )
+        _write_controller_logs(v1, namespace, requests_dir)

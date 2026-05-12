@@ -155,6 +155,7 @@ def main():
                 load_format,
                 requests_dir,
                 hpa_config,
+                fma_iterations,
                 REQUEST_TIMEOUT,
                 MAX_VLLM_WAIT,
                 write_log_per_process,
