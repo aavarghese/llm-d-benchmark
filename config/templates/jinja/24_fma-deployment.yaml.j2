@@ -47,11 +47,29 @@ spec:
   maxSleepingInstances: 3
   podTemplate:
     metadata:
-{% if fma.launcher.podTemplate.metadata.labels is defined %}
       labels:
+        # EPP InferencePool routing: 12_router-values.yaml.j2 emits a
+        # router.modelServers.matchLabels selector keyed on these two labels
+        # (camelCase `inferenceServing`, NOT the hyphenated `inference-serving`
+        # used elsewhere in this file). Stamping them on the launcher pod
+        # template makes the launcher discoverable by EPP, so a
+        # modelservice+FMA topology can route inference traffic to launcher
+        # pods after `decode.replicas: 0` removes the modelservice decode
+        # Deployment.
+        llm-d.ai/inferenceServing: "{{ labels.inferenceServing | default('true') }}"
+        llm-d.ai/model: "{{ model_id_label }}"
+{% if fma.launcher.podTemplate.metadata.labels is defined %}
 {% for key, value in fma.launcher.podTemplate.metadata.labels.items() %}
         {{ key }}: "{{ value }}"
 {% endfor %}
+{% endif %}
+{% if wva is defined and wva.enabled | default(false) %}
+        # WVA reads vLLM metrics from the launcher pod (where vLLM runs).
+        # Per PR #1145, the controller identifies a pod's variant by the
+        # llm-d.ai/variant label, and the matching ServiceMonitor relabel
+        # rule lifts it onto scraped metrics as llm_d_ai_variant. Value
+        # must equal the VariantAutoscaling resource name literally.
+        llm-d.ai/variant: "{{ model_id_label }}-fma"
 {% endif %}
 {% if fma.launcher.podTemplate.metadata.annotations is defined %}
       annotations:
@@ -67,6 +85,16 @@ spec:
         - name: inference-server
           image: {{ fma.launcher.image.repository }}:{{ fma.launcher.image.tag }}
           imagePullPolicy: {{ fma.launcher.image.pullPolicy }}
+          ports:
+            # vllm-metrics: vLLM listens on the InferenceServerConfig
+            # `modelServerConfig.port` (8005). Exposing it as a named port
+            # lets the standalone PodMonitor in `18_podmonitor.yaml.j2`
+            # reference `port: vllm-metrics` to scrape /metrics directly
+            # from vLLM. Without this, decode's PodMonitor flow has no
+            # named port to attach to on the launcher pod.
+            - name: vllm-metrics
+              containerPort: 8005
+              protocol: TCP
           command:
             - /bin/bash
             - "-c"
