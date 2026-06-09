@@ -80,7 +80,7 @@ class WvaSmoketestMixin:
              skips the VA — the most subtle WVA misconfiguration.
           5. The per-stack HPA exists and references the right scaleTargetRef:
              the modelservice decode Deployment ({model_id_label}-decode) or,
-             under fma.enabled, the FMA requester ReplicaSet
+             under fma.enabled, the FMA requester Deployment
              (fma-requester-{model_id_label}).
           6. The HPA's external-metric selector matches what WVA actually
              emits: `variant_name`, `exported_namespace`, and
@@ -149,11 +149,12 @@ class WvaSmoketestMixin:
             or _nested_get(config, "model", "shortName")
             or ""
         )
-        # Templates 27/28 retarget the VA + HPA at the FMA requester ReplicaSet
+        # Templates 27/28 retarget the VA + HPA at the FMA requester Deployment
         # when fma.enabled — variant suffix becomes `-fma` (vs `-decode` for
         # modelservice). The smoketest must follow the same gate so VA name
         # lookup, HPA scaleTargetRef expectation, and the metric selector's
-        # variant_name all stay aligned.
+        # variant_name all stay aligned. (Pre-PR-#552 the requester was a
+        # ReplicaSet; we tracked the upstream demo to Deployment.)
         fma_enabled = bool(_nested_get(config, "fma", "enabled") or False)
         if fma_enabled:
             va_name = f"{model_id_label}-fma"

@@ -7,22 +7,24 @@
 #     elastic vLLM tier instead.
 #
 #   FMA (fma.enabled: true)           launcher pods host vLLM and serve
-#     inference traffic; the requester ReplicaSet holds the GPU lease
+#     inference traffic; the requester Deployment holds the GPU lease
 #     that FMA scales.
 #
-#   WVA (wva.enabled: true)           scales the FMA requester ReplicaSet;
+#   WVA (wva.enabled: true)           scales the FMA requester Deployment;
 #     FMA's launcher-populator reconciles launcher pods to match.
 #
 # How EPP reaches FMA: 12_router-values.yaml.j2 emits a router.modelServers
-# selector matching `llm-d.ai/inferenceServing=true, llm-d.ai/model=<id>`,
-# and 24_fma-deployment.yaml.j2 stamps both labels on the launcher pod
-# template — so EPP discovers launcher pods exactly the way it would have
-# discovered decode pods.
+# selector matching `llm-d.ai/inferenceServing=true, llm-d.ai/model=<id>`.
+# 24_fma-deployment.yaml.j2 puts those labels on the InferenceServerConfig's
+# `modelServerConfig.labels` (NOT on the LauncherConfig pod template) — the
+# dual-pods controller propagates them to the launcher pod at BIND time, so
+# only launchers actually serving traffic show up in the InferencePool. See
+# PR llm-d-incubation/llm-d-fast-model-actuation#552 README.
 #
-# How WVA tracks FMA: launcher pods carry `llm-d.ai/variant=<id>-fma`
-# (label-based variant identification, WVA repo PR #1145), and templates
-# 27/28 retarget the VariantAutoscaling + HPA at the FMA requester
-# ReplicaSet (`fma-requester-<id>`) when fma.enabled is true.
+# How WVA tracks FMA: launcher pods carry `llm-d.ai/variant=<id>-fma` (also
+# applied at bind time via the ISC; label-based variant identification per
+# WVA repo PR #1145). Templates 27/28 retarget the VariantAutoscaling + HPA
+# at the FMA requester Deployment (`fma-requester-<id>`) when fma.enabled.
 #
 # Based on:
 #   https://github.com/llm-d/llm-d/blob/main/guides/workload-autoscaling/README.wva.md
@@ -36,22 +38,29 @@
 
 scenario:
   # ============================================================================
-  # Workload Autoscaling - Qwen3-32B served by FMA, autoscaled by WVA
+  # Workload Autoscaling - SmolLM2-360M served by FMA, autoscaled by WVA
   # ============================================================================
   - name: "workload-autoscaling"
 
     # =========================================================================
     # MODEL CONFIGURATION
+    #
+    # SmolLM2-360M-Instruct: small enough that multiple weight copies fit on a
+    # single 80 GiB H100, so FMA's level-1 sleep mode (which keeps weights pinned
+    # on GPU) can actually cache 3+ sleepers per launcher and exercise the
+    # T_HOT actuation path. A 32B+ model at level-1 sleep would only allow one
+    # instance per GPU at a time, defeating the wake-savings demo. Match
+    # PR llm-d-incubation/llm-d-fast-model-actuation#552 which uses this model.
     # =========================================================================
     model:
-      name: Qwen/Qwen3-32B
-      shortName: qwen-qwen3-32b
-      path: models/Qwen/Qwen3-32B
-      huggingfaceId: Qwen/Qwen3-32B
-      size: 1Ti
-      maxModelLen: 16000
-      blockSize: 64
-      gpuMemoryUtilization: 0.95
+      name: HuggingFaceTB/SmolLM2-360M-Instruct
+      shortName: smollm2-360m
+      path: models/HuggingFaceTB/SmolLM2-360M-Instruct
+      huggingfaceId: HuggingFaceTB/SmolLM2-360M-Instruct
+      size: 5Gi
+      maxModelLen: 8192
+      blockSize: 16
+      gpuMemoryUtilization: 0.9
 
     # =========================================================================
     # DEPLOYMENT METHOD — modelservice (gateway/EPP only, decode disabled)
@@ -65,7 +74,7 @@ scenario:
 
     fma:
       enabled: true                    # launcher pods host vLLM and serve traffic;
-                                       # WVA scales the requester ReplicaSet
+                                       # WVA scales the requester Deployment
       iterations: 1                    # only matters for nop-harness actuation timing
                                        # runs; with inference-perf the requester pods
                                        # are created once at standup and WVA drives
@@ -267,14 +276,10 @@ scenario:
     # when decode.replicas is 0). The router chart still renders gateway,
     # EPP, and InferencePool independently of decode_create.
     #
-    # decode.vllm.servicePort is set to 8005 so the InferencePool's
-    # targetPort matches where vLLM listens inside FMA launcher pods. The
-    # FMA InferenceServerConfig in `24_fma-deployment.yaml.j2` declares
-    # `port: 8005` for the launcher's modelServerConfig — this is the port
-    # vLLM binds to inside the launcher container. With decode disabled,
-    # `decode.vllm.servicePort` is only consumed by the router chart at
-    # `12_router-values.yaml.j2:215` (`router.modelServers.targetPorts`),
-    # so overriding it here only affects EPP's routing destination.
+    # vLLM port: defaults to 8000 inside the FMA launcher (matches the
+    # InferenceServerConfig in `24_fma-deployment.yaml.j2`). The router chart
+    # default (`decode.vllm.servicePort: 8000` in defaults.yaml) already
+    # matches, so no override is needed here.
     # =========================================================================
     prefill:
       enabled: false
@@ -282,9 +287,6 @@ scenario:
 
     decode:
       replicas: 0                      # FMA launcher pods serve traffic, not decode
-
-      vllm:
-        servicePort: 8005              # align EPP targetPort with FMA launcher vLLM port
 
     # =========================================================================
     # FMA LAUNCHER POD MONITORING (REQUIRED for WVA)

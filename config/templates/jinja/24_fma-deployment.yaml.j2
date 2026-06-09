@@ -21,15 +21,31 @@ metadata:
 spec:
   launcherConfigName: fma-{{ model_id_label }}
   modelServerConfig:
+    # IMPORTANT: labels here are stamped on the launcher pod at BIND time
+    # (when the dual-pods controller pairs a requester to a launcher), not
+    # at launcher creation time. Putting EPP/InferencePool routing labels
+    # here -- rather than on `LauncherConfig.spec.podTemplate.metadata.labels`
+    # -- means idle/unbound launchers don't appear in the InferencePool
+    # selector and don't receive traffic before vLLM is actually serving.
+    # See PR llm-d-incubation/llm-d-fast-model-actuation#552 README.
     labels:
       component: inference
+      # EPP InferencePool selector keys (see 12_router-values.yaml.j2:217-218):
+      llm-d.ai/inferenceServing: "{{ labels.inferenceServing | default('true') }}"
+      llm-d.ai/model: "{{ model_id_label }}"
+{% if wva is defined and wva.enabled | default(false) %}
+      # WVA PR #1145: variant label must equal the VariantAutoscaling
+      # resource name literally; the ServiceMonitor relabel rule lifts
+      # this onto scraped vLLM metrics as `llm_d_ai_variant`.
+      llm-d.ai/variant: "{{ model_id_label }}-fma"
+{% endif %}
     env_vars:
       HF_HOME: "{{ fma.modelMountPath }}"
       VLLM_LOGGING_LEVEL: DEBUG
       VLLM_SERVER_DEV_MODE: "1"
       VLLM_USE_V1: "1"
     options: "--model {{ model.name }} --enable-sleep-mode --no-enable-prefix-caching --load-format auto --gpu-memory-utilization 0.95 --tensor-parallel-size 1"
-    port: 8005
+    port: 8000
 ---
 apiVersion: fma.llm-d.ai/v1alpha1
 kind: LauncherConfig
@@ -44,32 +60,24 @@ metadata:
 {% endif %}
   namespace: {{ namespace.name }}
 spec:
-  maxSleepingInstances: 3
+  # MaxInstances replaces deprecated MaxSleepingInstances (FMA repo migrated
+  # the field; alpha.13 still accepts both via an effectiveMaxInstances() shim
+  # that maps `MaxSleepingInstances + 1` -> total cap. Setting `maxInstances: 4`
+  # preserves the prior "1 awake + 3 sleeping" semantic and is forward-compatible
+  # with post-alpha.13 releases that drop the legacy field entirely.
+  maxInstances: 4
   podTemplate:
     metadata:
-      labels:
-        # EPP InferencePool routing: 12_router-values.yaml.j2 emits a
-        # router.modelServers.matchLabels selector keyed on these two labels
-        # (camelCase `inferenceServing`, NOT the hyphenated `inference-serving`
-        # used elsewhere in this file). Stamping them on the launcher pod
-        # template makes the launcher discoverable by EPP, so a
-        # modelservice+FMA topology can route inference traffic to launcher
-        # pods after `decode.replicas: 0` removes the modelservice decode
-        # Deployment.
-        llm-d.ai/inferenceServing: "{{ labels.inferenceServing | default('true') }}"
-        llm-d.ai/model: "{{ model_id_label }}"
 {% if fma.launcher.podTemplate.metadata.labels is defined %}
+      # Routing/variant labels intentionally NOT here -- they belong on the
+      # InferenceServerConfig.spec.modelServerConfig.labels block above so
+      # the dual-pods controller stamps them on the launcher pod at BIND
+      # time (only when a requester is actively using it). See PR llm-d-
+      # incubation/llm-d-fast-model-actuation#552 README.
+      labels:
 {% for key, value in fma.launcher.podTemplate.metadata.labels.items() %}
         {{ key }}: "{{ value }}"
 {% endfor %}
-{% endif %}
-{% if wva is defined and wva.enabled | default(false) %}
-        # WVA reads vLLM metrics from the launcher pod (where vLLM runs).
-        # Per PR #1145, the controller identifies a pod's variant by the
-        # llm-d.ai/variant label, and the matching ServiceMonitor relabel
-        # rule lifts it onto scraped metrics as llm_d_ai_variant. Value
-        # must equal the VariantAutoscaling resource name literally.
-        llm-d.ai/variant: "{{ model_id_label }}-fma"
 {% endif %}
 {% if fma.launcher.podTemplate.metadata.annotations is defined %}
       annotations:
@@ -85,16 +93,10 @@ spec:
         - name: inference-server
           image: {{ fma.launcher.image.repository }}:{{ fma.launcher.image.tag }}
           imagePullPolicy: {{ fma.launcher.image.pullPolicy }}
-          ports:
-            # vllm-metrics: vLLM listens on the InferenceServerConfig
-            # `modelServerConfig.port` (8005). Exposing it as a named port
-            # lets the standalone PodMonitor in `18_podmonitor.yaml.j2`
-            # reference `port: vllm-metrics` to scrape /metrics directly
-            # from vLLM. Without this, decode's PodMonitor flow has no
-            # named port to attach to on the launcher pod.
-            - name: vllm-metrics
-              containerPort: 8005
-              protocol: TCP
+          # No named port for vllm-metrics: 18_podmonitor.yaml.j2 forces the
+          # scrape address to <pod-ip>:8000 via a relabel rule (matches the
+          # pattern used by PR llm-d-incubation/llm-d-fast-model-actuation#552).
+          # That sidesteps the named-port question entirely.
           command:
             - /bin/bash
             - "-c"
@@ -171,7 +173,7 @@ spec:
       launcherCount: 1
 ---
 apiVersion: apps/v1
-kind: ReplicaSet
+kind: Deployment
 metadata:
   name: fma-requester-{{ model_id_label }}
   labels:

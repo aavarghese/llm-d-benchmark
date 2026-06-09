@@ -25,11 +25,12 @@
    Only rendered when wva.enabled is true.
    ============================================================================ #}
 {% if wva is defined and wva.enabled | default(false) %}
-{# Mirror VA's targeting: when fma.enabled, scale the FMA requester ReplicaSet;
-   otherwise the modelservice decode Deployment. variant_name selector must
-   match the VA name (= what WVA emits as `va.Name` in the metric). #}
+{# Mirror VA's targeting: when fma.enabled, scale the FMA requester Deployment;
+   otherwise the modelservice decode Deployment. Both kinds are Deployment
+   (matches PR llm-d-incubation/llm-d-fast-model-actuation#552). variant_name
+   selector must match the VA name (= what WVA emits as `va.Name` in the metric). #}
 {% if fma is defined and fma.enabled | default(false) %}
-{% set scale_kind = 'ReplicaSet' %}
+{% set scale_kind = 'Deployment' %}
 {% set scale_name = 'fma-requester-' ~ model_id_label %}
 {% set variant_suffix = 'fma' %}
 {% else %}

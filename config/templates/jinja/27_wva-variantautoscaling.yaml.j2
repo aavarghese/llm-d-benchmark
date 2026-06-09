@@ -41,12 +41,14 @@
                     else ('MI300X' if 'MI300X' in accel_label
                     else ('G2' if 'G2' in accel_label
                     else '')))) %}
-{# When fma.enabled is true, target the FMA requester ReplicaSet instead of
-   the modelservice decode Deployment. The variant suffix (fma/decode) keeps
-   the VA's name + Prometheus variant label aligned with what the requester
-   pod template emits via llm-d.ai/variant. #}
+{# When fma.enabled is true, target the FMA requester Deployment instead of
+   the modelservice decode Deployment. Both kinds are Deployment (matches the
+   pattern in PR llm-d-incubation/llm-d-fast-model-actuation#552); only the
+   name differs. The variant suffix (fma/decode) keeps the VA's name + the
+   Prometheus variant label aligned with what the dual-pods controller emits
+   onto launcher pods at bind time via the InferenceServerConfig. #}
 {% if fma is defined and fma.enabled | default(false) %}
-{% set scale_kind = 'ReplicaSet' %}
+{% set scale_kind = 'Deployment' %}
 {% set scale_name = 'fma-requester-' ~ model_id_label %}
 {% set variant_suffix = 'fma' %}
 {% else %}
